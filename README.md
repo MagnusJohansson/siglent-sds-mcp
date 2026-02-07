@@ -44,7 +44,7 @@ No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 o
       "args": [
         "run", "--rm", "-i",
         "-e", "SIGLENT_IP=192.168.1.126",
-        "ghcr.io/MagnusJohansson/siglent-sds-mcp:latest"
+        "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
       ]
     }
   }
@@ -73,7 +73,7 @@ Requires Node.js 20+. Downloads and runs the package automatically.
 ### Option C: Clone and build
 
 ```bash
-git clone https://github.com/MagnusJohansson/siglent-sds-mcp.git
+git clone https://github.com/magnusjohansson/siglent-sds-mcp.git
 cd siglent-sds-mcp
 npm install
 npm run build
@@ -246,7 +246,7 @@ By default, Docker containers can reach LAN devices via the bridge network (NAT)
 - Verify the scope is reachable from your host: `telnet 192.168.1.126 5025`
 - On Linux, try adding `--network host` to the Docker args:
   ```json
-  "args": ["run", "--rm", "-i", "--network", "host", "-e", "SIGLENT_IP=192.168.1.126", "ghcr.io/MagnusJohansson/siglent-sds-mcp:latest"]
+  "args": ["run", "--rm", "-i", "--network", "host", "-e", "SIGLENT_IP=192.168.1.126", "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"]
   ```
   Note: `--network host` does not work on macOS or Windows Docker Desktop.
 
@@ -255,7 +255,7 @@ By default, Docker containers can reach LAN devices via the bridge network (NAT)
 The published image supports `linux/amd64` and `linux/arm64`. Docker should pull the correct one automatically. If you see an exec format error, pull explicitly:
 
 ```bash
-docker pull --platform linux/amd64 ghcr.io/MagnusJohansson/siglent-sds-mcp:latest
+docker pull --platform linux/amd64 ghcr.io/magnusjohansson/siglent-sds-mcp:latest
 ```
 
 ### "CHDR" appears in responses
