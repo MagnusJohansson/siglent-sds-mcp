@@ -1,0 +1,10 @@
+node_modules
+build
+*.tsbuildinfo
+.git
+.gitignore
+.claude
+.mcp.json
+docs
+*.png
+pnpm-lock.yaml

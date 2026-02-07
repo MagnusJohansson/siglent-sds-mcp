@@ -1,0 +1,51 @@
+{
+  "name": "siglent-sdx-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Siglent SDX oscilloscope control via SCPI over TCP sockets",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "siglent-sdx-mcp": "./build/index.js"
+  },
+  "files": [
+    "build/**/*.js",
+    "build/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node build/index.js",
+    "dev": "tsc && node build/index.js",
+    "inspector": "npx @modelcontextprotocol/inspector node build/index.js",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "siglent",
+    "oscilloscope",
+    "scpi"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OWNER/siglent-sdx-mcp.git"
+  },
+  "author": "Magnus Johansson",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "sharp": "^0.34.5",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/sharp": "^0.31.1",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
