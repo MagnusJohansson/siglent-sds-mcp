@@ -19,7 +19,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const server = new McpServer({
-  name: "siglent-sdx-mcp",
+  name: "siglent-sds-mcp",
   version: "1.0.0",
 });
 
@@ -34,7 +34,7 @@ registerScpiTools(server);
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("siglent-sdx-mcp server running on stdio");
+  console.error("siglent-sds-mcp server running on stdio");
 
   // Auto-connect if SIGLENT_IP is set (fire-and-forget, don't block MCP startup)
   const autoIp = process.env.SIGLENT_IP;
