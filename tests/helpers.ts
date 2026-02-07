@@ -10,7 +10,7 @@ import { registerScpiTools } from "../src/tools/scpi.js";
 
 export async function createTestServer() {
   const server = new McpServer({
-    name: "siglent-sdx-mcp-test",
+    name: "siglent-sds-mcp-test",
     version: "1.0.0",
   });
 
