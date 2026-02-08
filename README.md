@@ -109,6 +109,186 @@ If `SIGLENT_IP` is set, the server attempts to connect to the scope immediately 
 
 If `SIGLENT_IP` is not set, the server starts without a scope connection. Use the `connect` tool to connect when ready.
 
+## Using with Other AI Clients
+
+The Quick Start examples above use Claude Code's `.mcp.json` format, which includes a `"type": "stdio"` field. Other AI clients use the same JSON structure but **without** the `"type"` field and with different config file locations.
+
+### Claude Desktop
+
+Edit `claude_desktop_config.json`:
+
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+#### Docker
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-e", "SIGLENT_IP=192.168.1.126",
+        "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+#### npx
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "npx",
+      "args": ["-y", "siglent-sds-mcp"],
+      "env": {
+        "SIGLENT_IP": "192.168.1.126"
+      }
+    }
+  }
+}
+```
+
+> **Note:** You must fully restart Claude Desktop after changing the config file.
+
+### Cursor
+
+Edit one of:
+
+- **User-level:** `~/.cursor/mcp.json` (available across all projects)
+- **Project-level:** `.cursor/mcp.json` (shared with your team via version control)
+
+You can also add servers through the UI: **Settings > Cursor Settings > MCP > Add new global MCP server**.
+
+#### Docker
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-e", "SIGLENT_IP=192.168.1.126",
+        "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+#### npx
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "npx",
+      "args": ["-y", "siglent-sds-mcp"],
+      "env": {
+        "SIGLENT_IP": "192.168.1.126"
+      }
+    }
+  }
+}
+```
+
+### Windsurf
+
+Edit `mcp_config.json`:
+
+- **Windows:** `%USERPROFILE%\.codeium\windsurf\mcp_config.json`
+- **macOS/Linux:** `~/.codeium/windsurf/mcp_config.json`
+
+You can also configure servers through the UI: **Cascade panel > MCP icon > Manage MCP Servers > View raw config**.
+
+#### Docker
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-e", "SIGLENT_IP=192.168.1.126",
+        "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+#### npx
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "npx",
+      "args": ["-y", "siglent-sds-mcp"],
+      "env": {
+        "SIGLENT_IP": "192.168.1.126"
+      }
+    }
+  }
+}
+```
+
+### Google Antigravity
+
+Configuration is managed through the IDE's UI:
+
+1. Open the **Agent pane** on the right side of the workspace
+2. Click the **`...`** button at the top
+3. Select **MCP Servers**
+4. Click **Manage MCP Servers**
+5. Click **View raw config**
+6. Add the configuration below and save
+
+#### Docker
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-e", "SIGLENT_IP=192.168.1.126",
+        "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
+      ]
+    }
+  }
+}
+```
+
+#### npx
+
+```json
+{
+  "mcpServers": {
+    "siglent-sds": {
+      "command": "npx",
+      "args": ["-y", "siglent-sds-mcp"],
+      "env": {
+        "SIGLENT_IP": "192.168.1.126"
+      }
+    }
+  }
+}
+```
+
+Replace `192.168.1.126` with your scope's IP address in all examples above.
+
+### ChatGPT Desktop
+
+ChatGPT Desktop only supports remote HTTPS MCP servers (called "connectors"), not local stdio servers. Since this MCP server uses stdio transport, it is not directly compatible with ChatGPT Desktop.
+
 ## Tools
 
 12 tools across 6 categories. See [docs/tools-reference.md](docs/tools-reference.md) for full parameter details.
