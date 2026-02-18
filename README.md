@@ -6,6 +6,14 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that l
 
 This MCP server communicates with Siglent SDS oscilloscopes via SCPI commands over TCP sockets (port 5025). No VISA drivers or NI-MAX installation required — just a network connection to your scope.
 
+![Oscilloscope screenshot captured via MCP](docs/screenshot-scope.png)
+
+*Oscilloscope display captured through the `screenshot` MCP tool.*
+
+![MCP interaction in terminal](docs/screenshot-terminal.png)
+
+*Natural-language scope control and measurement workflow in the terminal.*
+
 **Key features:**
 
 - 12 tools covering channels, timebase, triggers, measurements, waveform capture, and screenshots
