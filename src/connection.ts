@@ -1,8 +1,8 @@
 import * as net from "node:net";
 import {
   assertBinaryQuery,
+  assertIsCommand,
   assertIsQuery,
-  assertWireSafe,
 } from "./security/scpi-guard.js";
 import { assertConnectAllowed, type HostPolicy } from "./security/host-policy.js";
 
@@ -39,9 +39,19 @@ export function channelCountFromModel(model: string): number | undefined {
   return m ? parseInt(m[1], 10) : undefined;
 }
 
-/** *OPC? answers "1" (or "*OPC 1" while command headers are still on). */
-function isOpcReply(reply: string): boolean {
-  return /^(\*OPC\s+)?1$/i.test(reply.trim());
+/**
+ * *OPC? answers "1" (or "*OPC 1" while command headers are still on).
+ * Anything else means another reply arrived first, e.g. from a command that
+ * produced output; the real "1" is still on its way and would answer the
+ * next query.
+ */
+function opcProblem(cmd: string, reply: Buffer): string | undefined {
+  const text = reply.toString("utf-8").trim();
+  if (/^(\*OPC\s+)?1$/i.test(text)) return undefined;
+  return (
+    `Unexpected reply to "${cmd}": ${JSON.stringify(text.slice(0, 80))}. ` +
+    "Commands must not produce output (use scpi_query for queries). The connection was reset."
+  );
 }
 
 interface QueuedQuery {
@@ -50,6 +60,12 @@ interface QueuedQuery {
   pre?: string;
   binary: boolean;
   timeout: number;
+  /**
+   * Checks the reply before anything else is sent. Returns an error message
+   * if the reply is out of step; the connection is then reset and queued
+   * work is rejected without reaching the scope.
+   */
+  validate?: (reply: Buffer) => string | undefined;
   resolve: (value: Buffer) => void;
   reject: (reason: Error) => void;
 }
@@ -149,7 +165,9 @@ export class SiglentConnection {
           this.dataBuffer = Buffer.alloc(0);
 
           // Set CHDR OFF for clean numeric responses
-          await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, "CHDR OFF");
+          await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, "CHDR OFF", (r) =>
+            opcProblem("CHDR OFF", r)
+          );
           await this.delay(100);
           if (superseded()) throw new Error("superseded by a newer connect");
 
@@ -245,7 +263,7 @@ export class SiglentConnection {
   async sendCommand(cmd: string): Promise<void> {
     // The connection is the single choke point to the instrument, so this
     // check applies regardless of which tool built the command.
-    assertWireSafe(cmd);
+    assertIsCommand(cmd);
     await this.ensureReady();
     // The scope silently drops commands that arrive while it is still applying
     // the previous one (e.g. a VDIV change takes ~250ms on SDS1202X-E fw 1.3.27).
@@ -255,21 +273,9 @@ export class SiglentConnection {
     // The two must be separate writes: if "*OPC?" arrives in the same packet
     // the scope mis-parses the command's numeric argument and clamps it
     // (e.g. "TDIV 50US" becomes 1ns).
-    const reply = (
-      await this.enqueueQuery("*OPC?", false, this.options.commandTimeoutMs, cmd)
-    )
-      .toString("utf-8")
-      .trim();
-    if (!isOpcReply(reply)) {
-      // Something else answered first, e.g. a query sent as a command. The
-      // real "1" is still on its way and would answer the next query, so the
-      // connection is reset rather than left out of step.
-      this.close("Connection reset: unexpected reply");
-      throw new Error(
-        `Unexpected reply to "${cmd}": ${JSON.stringify(reply.slice(0, 80))}. ` +
-          "Commands must not produce output (use scpi_query for queries). The connection was reset."
-      );
-    }
+    await this.enqueueQuery("*OPC?", false, this.options.commandTimeoutMs, cmd, (r) =>
+      opcProblem(cmd, r)
+    );
   }
 
   async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
@@ -291,11 +297,12 @@ export class SiglentConnection {
     cmd: string,
     binary: boolean,
     timeout: number,
-    pre?: string
+    pre?: string,
+    validate?: (reply: Buffer) => string | undefined
   ): Promise<Buffer> {
     this.clearIdleTimer();
     const result = new Promise<Buffer>((resolve, reject) => {
-      this.queryQueue.push({ cmd, pre, binary, timeout, resolve, reject });
+      this.queryQueue.push({ cmd, pre, binary, timeout, validate, resolve, reject });
       this.drainQueue();
     });
     result.then(
@@ -314,7 +321,7 @@ export class SiglentConnection {
     }
     this.queryRunning = true;
 
-    const { cmd, pre, binary, timeout, resolve, reject } = this.queryQueue.shift()!;
+    const { cmd, pre, binary, timeout, validate, resolve, reject } = this.queryQueue.shift()!;
 
     this.expectedBinaryLength = null;
     this.binaryDataStart = 0;
@@ -323,6 +330,14 @@ export class SiglentConnection {
 
     this.responseResolve = (buf) => {
       this.queryRunning = false;
+      // Validate before starting the next queued operation: if this reply is
+      // out of step, nothing else may reach the scope on this connection.
+      const problem = validate?.(buf);
+      if (problem) {
+        reject(new Error(problem));
+        this.close("Connection reset: an earlier reply was out of step");
+        return;
+      }
       resolve(buf);
       this.drainQueue();
     };

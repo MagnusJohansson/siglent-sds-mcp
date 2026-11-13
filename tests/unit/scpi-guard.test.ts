@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   assertBinaryQuery,
+  assertIsCommand,
   assertIsQuery,
   assertWireSafe,
   ScpiPolicyError,
@@ -69,4 +70,21 @@ describe("assertBinaryQuery", () => {
       expect(() => assertBinaryQuery(cmd)).toThrow(ScpiPolicyError);
     }
   );
+});
+
+describe("assertIsCommand", () => {
+  it.each(["C1:VDIV 500mV", "ARM", "TRSE EDGE,SR,C2", "*RST"])("accepts %s", (cmd) => {
+    expect(() => assertIsCommand(cmd)).not.toThrow();
+  });
+
+  it.each([
+    ["a query", "C1:VDIV?"],
+    ["*OPC? (answers like the acknowledgement)", "*OPC?"],
+    ["a query with parameters", "C1:PAVA? FREQ"],
+    ["a screen dump", "SCDP"],
+    ["a long-form screen dump", ":SCREEN_DUMP"],
+    ["an injected second command", "ARM\nSTOP"],
+  ])("rejects %s", (_label, cmd) => {
+    expect(() => assertIsCommand(cmd)).toThrow(ScpiPolicyError);
+  });
 });

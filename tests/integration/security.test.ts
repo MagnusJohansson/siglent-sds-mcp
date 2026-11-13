@@ -186,10 +186,13 @@ describe("raw SCPI enabled", () => {
     }
   );
 
-  it("resets the connection when a command produces a reply, so the next query isn't answered by a stale '1'", async () => {
-    const msg = await expectRejected(ctx.client, "scpi_command", { command: "C1:VDIV?" });
-    expect(msg).toMatch(/Unexpected reply/);
-    const res = await callTool(ctx.client, "scpi_query", { command: "C1:VDIV?" });
-    expect(getText(res)).toBe("1.00E+00");
+  it.each([
+    ["a query", "C1:VDIV?"],
+    ["a query that answers '1' like the acknowledgement", "*OPC?"],
+    ["a screen dump", "SCDP"],
+  ])("rejects %s before it reaches the scope", async (_label, command) => {
+    const msg = await expectRejected(ctx.client, "scpi_command", { command });
+    expect(msg).toMatch(/is a query|returns data/);
+    expect(await wire(ctx.client)).toEqual([]);
   });
 });
