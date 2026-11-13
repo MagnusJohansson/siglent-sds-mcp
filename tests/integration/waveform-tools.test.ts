@@ -94,6 +94,7 @@ const mockConnection = vi.hoisted(() => ({
   getConnectionInfo: vi.fn(() => "192.168.1.126:5025"),
   connect: vi.fn(async () => "Siglent,SDS1104X-E,SDS1ECAX12345,8.2.6.1.37R1"),
   disconnect: vi.fn(),
+  checkChannel: vi.fn(async () => {}),
   sendCommand: vi.fn(async () => {}),
   query: vi.fn(async (cmd: string) => {
     const responses: Record<string, string> = {
@@ -101,6 +102,7 @@ const mockConnection = vi.hoisted(() => ({
       "C1:OFST?": "0.00E+00",
       "TDIV?": "1.00E-03",
       "SARA?": "1.00E+06",
+      "TRDL?": "0.00E+00",
     };
     return responses[cmd] ?? "";
   }),
@@ -140,6 +142,7 @@ beforeEach(() => {
       "C1:OFST?": "0.00E+00",
       "TDIV?": "1.00E-03",
       "SARA?": "1.00E+06",
+      "TRDL?": "0.00E+00",
     };
     return responses[cmd] ?? "";
   });
@@ -179,6 +182,30 @@ describe("get_waveform", () => {
     expect(parsed.total_points).toBe(10);
     // step=ceil(10/5)=2, indices 0,2,4,6,8 = 5 points
     expect(parsed.returned_points).toBe(5);
+  });
+
+  it("starts the time axis at -7 divisions with zero trigger delay", async () => {
+    const parsed = JSON.parse(getText(await callTool(client, "get_waveform", { channel: "C1" })));
+    // tdiv=1ms, 14 divisions => -7ms; sara=1MSa/s => 1us spacing
+    expect(parsed.data[0].time).toBeCloseTo(-7e-3, 9);
+    expect(parsed.data[1].time).toBeCloseTo(-7e-3 + 1e-6, 9);
+  });
+
+  it("shifts the time axis by the trigger delay", async () => {
+    mockConnection.query.mockImplementation(async (cmd: string) => {
+      const responses: Record<string, string> = {
+        "C1:VDIV?": "1.00E+00",
+        "C1:OFST?": "0.00E+00",
+        "TDIV?": "1.00E-03",
+        "SARA?": "1.00E+06",
+        // Negative delay = trigger shown 2 divisions left of centre
+        "TRDL?": "-2.00E-03",
+      };
+      return responses[cmd] ?? "";
+    });
+    const parsed = JSON.parse(getText(await callTool(client, "get_waveform", { channel: "C1" })));
+    // Screen spans -5ms..+9ms around the trigger point
+    expect(parsed.data[0].time).toBeCloseTo(-5e-3, 9);
   });
 });
 

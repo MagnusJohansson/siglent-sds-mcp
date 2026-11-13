@@ -110,12 +110,19 @@ Replace `/path/to/siglent-sds-mcp` with the actual path to your clone.
 |----------|----------|---------|-------------|
 | `SIGLENT_IP` | No | — | Oscilloscope IP address for auto-connect on startup |
 | `SIGLENT_PORT` | No | `5025` | TCP port (only change if your setup differs) |
+| `SIGLENT_IDLE_TIMEOUT` | No | `0` (never) | Seconds of inactivity after which the scope connection is released. The next tool call reconnects automatically. |
 
 ### Auto-Connect Behavior
 
 If `SIGLENT_IP` is set, the server attempts to connect to the scope immediately after starting. This runs in the background and does **not** block the MCP server — Claude can start using other tools right away. If the scope is offline or unreachable, the server logs a warning and you can connect manually later using the `connect` tool.
 
 If `SIGLENT_IP` is not set, the server starts without a scope connection. Use the `connect` tool to connect when ready.
+
+If the connection is closed (by the idle timeout, or the scope restarting), the next tool call reconnects automatically to the last host. An explicit `disconnect` turns this off until `connect` is called again.
+
+### One Client at a Time
+
+The scope serves a single TCP client on port 5025. A second client can open the socket but gets no replies, so the server reports that the scope is probably in use by another program. If more than one MCP client uses the same scope, set `SIGLENT_IDLE_TIMEOUT` (e.g. `60`) in each so an idle server releases the scope for the other.
 
 ## Using with Other AI Clients
 

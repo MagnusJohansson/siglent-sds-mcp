@@ -7,12 +7,15 @@ const mockConnection = vi.hoisted(() => ({
   getConnectionInfo: vi.fn(() => "192.168.1.126:5025"),
   connect: vi.fn(async () => "Siglent,SDS1104X-E,SDS1ECAX12345,8.2.6.1.37R1"),
   disconnect: vi.fn(),
+  checkChannel: vi.fn(async () => {}),
   sendCommand: vi.fn(async () => {}),
   query: vi.fn(async (cmd: string) => {
     const responses: Record<string, string> = {
       "C1:PAVA? FREQ": "FREQ,1.000000E+03Hz",
       "C1:PAVA? PKPK": "PKPK,3.280E+00V",
       "PAVA? STAT1": "C1:MEAN,curr=1.234E+00V,mean=1.230E+00V,min=1.200E+00V,max=1.260E+00V,sdev=1.500E-02V,num=100",
+      "PAVA? STAT2": "STAT2 C1 PKPK:cur,1.200000E-02,mean,1.200000E-02,min,1.200000E-02,max,1.200000E-02,std-dev,0.000000E+00,count,3",
+      "PAVA? STAT3": "STAT3 C2 MEAN:cur,1.680000E-03,mean,1.590000E-03,min,1.350000E-03,max,1.750000E-03,std-dev,1.730100E-04,count,3",
     };
     return responses[cmd] ?? "";
   }),
@@ -87,6 +90,28 @@ describe("measure_statistics", () => {
     expect(text).toContain("statistics");
     expect(text).toContain("curr=1.234E+00V");
     expect(text).toContain("mean=1.230E+00V");
+  });
+
+  it("finds the matching statistics slot when it isn't slot 1", async () => {
+    // Real SDS1202X-E (fw 1.3.27) reply format; C2 MEAN sits in slot 3
+    const result = await callTool(client, "measure_statistics", {
+      channel: "C2",
+      parameter: "MEAN",
+      action: "read",
+    });
+    const text = getText(result);
+    expect(text).toContain("STAT3 C2 MEAN:cur,1.680000E-03");
+    expect(text).not.toContain("C1 PKPK");
+  });
+
+  it("returns an error when no slot matches", async () => {
+    const result = await callTool(client, "measure_statistics", {
+      channel: "C2",
+      parameter: "FREQ",
+      action: "read",
+    });
+    expect(result.isError).toBe(true);
+    expect(getText(result)).toContain("no statistics slot found for C2 FREQ");
   });
 
   it("resets statistics with 'reset' action", async () => {

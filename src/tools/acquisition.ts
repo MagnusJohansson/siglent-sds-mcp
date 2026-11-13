@@ -74,21 +74,28 @@ export function registerAcquisitionTools(server: McpServer): void {
           commandsSent.push(`TRMD ${trigger_mode}`);
         }
 
-        if (trigger_source !== undefined && trigger_level !== undefined) {
-          await connection.sendCommand(
-            `${trigger_source}:TRLV ${trigger_level}`
-          );
-          commandsSent.push(`${trigger_source}:TRLV ${trigger_level}`);
-        } else if (trigger_level !== undefined) {
-          // Apply to C1 by default if no source specified
-          await connection.sendCommand(`C1:TRLV ${trigger_level}`);
-          commandsSent.push(`C1:TRLV ${trigger_level}`);
+        if (trigger_source !== undefined) {
+          if (/^C\d$/.test(trigger_source)) {
+            await connection.checkChannel(trigger_source);
+          }
+          await connection.sendCommand(`TRSE EDGE,SR,${trigger_source}`);
+          commandsSent.push(`TRSE EDGE,SR,${trigger_source}`);
         }
 
-        if (trigger_slope !== undefined) {
-          const src = trigger_source || "C1";
-          await connection.sendCommand(`${src}:TRSL ${trigger_slope}`);
-          commandsSent.push(`${src}:TRSL ${trigger_slope}`);
+        if (trigger_level !== undefined || trigger_slope !== undefined) {
+          // Level/slope are per-channel; apply them to the active trigger
+          // source rather than assuming C1 (setting <ch>:TRLV also switches
+          // the trigger source to <ch> on SDS1000X-E).
+          const src =
+            trigger_source ?? (await getTriggerSource()) ?? "C1";
+          if (trigger_level !== undefined) {
+            await connection.sendCommand(`${src}:TRLV ${trigger_level}`);
+            commandsSent.push(`${src}:TRLV ${trigger_level}`);
+          }
+          if (trigger_slope !== undefined) {
+            await connection.sendCommand(`${src}:TRSL ${trigger_slope}`);
+            commandsSent.push(`${src}:TRSL ${trigger_slope}`);
+          }
         }
 
         if (command !== undefined) {
@@ -161,14 +168,17 @@ export function registerAcquisitionTools(server: McpServer): void {
           connection.query("TRSE?"),
         ]);
 
-        // Query trigger level for C1 (common default source)
+        // Query level/slope of the active trigger source
+        const trigSource = parseTriggerSource(trse);
         let trigLevel = "";
         let trigSlope = "";
-        try {
-          trigLevel = await connection.query("C1:TRLV?");
-          trigSlope = await connection.query("C1:TRSL?");
-        } catch {
-          // Trigger source may not be C1
+        if (trigSource) {
+          try {
+            trigLevel = await connection.query(`${trigSource}:TRLV?`);
+            trigSlope = await connection.query(`${trigSource}:TRSL?`);
+          } catch {
+            // Source may not support level/slope (e.g. serial trigger types)
+          }
         }
 
         const result = {
@@ -178,8 +188,9 @@ export function registerAcquisitionTools(server: McpServer): void {
           trigger_delay: trdl,
           trigger_mode: trmd,
           trigger_select: trse,
-          trigger_level_c1: trigLevel,
-          trigger_slope_c1: trigSlope,
+          trigger_source: trigSource ?? "",
+          trigger_level: trigLevel,
+          trigger_slope: trigSlope,
         };
 
         return {
@@ -200,4 +211,19 @@ export function registerAcquisitionTools(server: McpServer): void {
       }
     }
   );
+}
+
+// TRSE? returns e.g. "EDGE,SR,C2,HT,OFF" — the source follows the SR field.
+function parseTriggerSource(trse: string): string | undefined {
+  const parts = trse.split(",").map((p) => p.trim());
+  const i = parts.indexOf("SR");
+  return i >= 0 ? parts[i + 1] : undefined;
+}
+
+async function getTriggerSource(): Promise<string | undefined> {
+  try {
+    return parseTriggerSource(await connection.query("TRSE?"));
+  } catch {
+    return undefined;
+  }
 }

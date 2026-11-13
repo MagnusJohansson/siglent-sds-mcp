@@ -3,9 +3,30 @@ import * as net from "node:net";
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
 const BINARY_TIMEOUT = 30000;
+// Gap between a command and its *OPC? so they reach the scope as separate
+// reads; a write callback alone doesn't stop the receiver coalescing them.
+const OPC_GAP_MS = 20;
+
+/**
+ * Seconds of inactivity after which the socket is closed (0 = never). The
+ * scope serves one TCP client at a time, so holding the connection open
+ * blocks any other client — e.g. a second MCP host using the same scope.
+ */
+function idleTimeoutMs(): number {
+  const secs = parseFloat(process.env.SIGLENT_IDLE_TIMEOUT || "0");
+  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 0;
+}
+
+/** Channel count from the model name, e.g. SDS1202X-E -> 2, SDS1104X-E -> 4 */
+export function channelCountFromModel(model: string): number | undefined {
+  const m = /SDS\d{3}(\d)/i.exec(model);
+  return m ? parseInt(m[1], 10) : undefined;
+}
 
 interface QueuedQuery {
   cmd: string;
+  /** Command written (and flushed) before `cmd`, e.g. a setter paced by *OPC? */
+  pre?: string;
   binary: boolean;
   timeout: number;
   resolve: (value: Buffer) => void;
@@ -25,14 +46,32 @@ export class SiglentConnection {
   private headerParsed = false;
   private queryQueue: QueuedQuery[] = [];
   private queryRunning = false;
+  private model = "";
+  private connecting: Promise<string> | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set by an explicit disconnect() so we don't silently reconnect afterwards
+  private autoConnectSuppressed = false;
 
   async connect(host: string, port: number = DEFAULT_PORT): Promise<string> {
+    // Track the attempt so tool calls made meanwhile wait for it (and get its
+    // error) instead of queueing on a socket that may not initialize.
+    const attempt = this.openConnection(host, port);
+    this.connecting = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (this.connecting === attempt) this.connecting = null;
+    }
+  }
+
+  private async openConnection(host: string, port: number): Promise<string> {
     if (this.socket) {
-      this.disconnect();
+      this.close();
     }
 
     this.host = host;
     this.port = port;
+    this.autoConnectSuppressed = false;
 
     return new Promise((resolve, reject) => {
       const socket = new net.Socket();
@@ -55,17 +94,28 @@ export class SiglentConnection {
           this.dataBuffer = Buffer.alloc(0);
 
           // Set CHDR OFF for clean numeric responses
-          await this.sendCommand("CHDR OFF");
+          await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, "CHDR OFF");
           await this.delay(100);
 
           // Query identification
-          const idn = await this.query("*IDN?");
+          const idn = (
+            await this.enqueueQuery("*IDN?", false, DEFAULT_TIMEOUT)
+          )
+            .toString("utf-8")
+            .trim();
+          this.model = idn.split(",")[1]?.trim() ?? "";
           resolve(idn);
         } catch (err) {
-          this.disconnect();
+          this.close();
+          const msg = err instanceof Error ? err.message : String(err);
           reject(
             new Error(
-              `Connected but failed to initialize: ${err instanceof Error ? err.message : String(err)}`
+              /timeout/i.test(msg)
+                ? `${host}:${port} accepted the connection but did not respond. ` +
+                  `The scope serves one client at a time, so it is probably in ` +
+                  `use by another program (another MCP server, EasyScopeX, ...). ` +
+                  `Close that connection and try again.`
+                : `Connected but failed to initialize: ${msg}`
             )
           );
         }
@@ -80,7 +130,14 @@ export class SiglentConnection {
     });
   }
 
+  /** Close the connection and don't auto-reconnect until connect() is called */
   disconnect(): void {
+    this.autoConnectSuppressed = true;
+    this.close();
+  }
+
+  private close(): void {
+    this.clearIdleTimer();
     const pending = this.queryQueue.splice(0);
     this.queryRunning = false;
     if (this.responseReject) {
@@ -102,23 +159,47 @@ export class SiglentConnection {
     return this.socket !== null && !this.socket.destroyed;
   }
 
+  /** Model name from *IDN?, e.g. "SDS1202X-E" (empty until connected) */
+  getModel(): string {
+    return this.model;
+  }
+
+  /**
+   * Throw if `channel` (e.g. "C3") doesn't exist on the connected model.
+   * A 2-channel scope answers C3/C4 queries with placeholder values rather
+   * than an error, so without this check tools return plausible junk.
+   */
+  async checkChannel(channel: string): Promise<void> {
+    await this.ensureReady();
+    const count = channelCountFromModel(this.model);
+    const n = /^C(\d)$/.exec(channel);
+    if (count !== undefined && n && parseInt(n[1], 10) > count) {
+      throw new Error(
+        `${channel} does not exist on the ${this.model} (${count} channels: C1-C${count})`
+      );
+    }
+  }
+
   getConnectionInfo(): string {
     if (!this.isConnected()) return "Not connected";
     return `${this.host}:${this.port}`;
   }
 
   async sendCommand(cmd: string): Promise<void> {
-    this.ensureConnected();
-    return new Promise((resolve, reject) => {
-      this.socket!.write(cmd + "\n", (err) => {
-        if (err) reject(new Error(`Write failed: ${err.message}`));
-        else resolve();
-      });
-    });
+    await this.ensureReady();
+    // The scope silently drops commands that arrive while it is still applying
+    // the previous one (e.g. a VDIV change takes ~250ms on SDS1202X-E fw 1.3.27).
+    // Follow each command with *OPC? and wait for its reply so commands are
+    // paced by the scope itself. Going through the query queue also keeps the
+    // pair from interleaving with concurrent queries.
+    // The two must be separate writes: if "*OPC?" arrives in the same packet
+    // the scope mis-parses the command's numeric argument and clamps it
+    // (e.g. "TDIV 50US" becomes 1ns).
+    await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, cmd);
   }
 
   async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
-    this.ensureConnected();
+    await this.ensureReady();
     const buf = await this.enqueueQuery(cmd, false, timeout);
     return buf.toString("utf-8").trim();
   }
@@ -127,26 +208,34 @@ export class SiglentConnection {
     cmd: string,
     timeout: number = BINARY_TIMEOUT
   ): Promise<Buffer> {
-    this.ensureConnected();
+    await this.ensureReady();
     return this.enqueueQuery(cmd, true, timeout);
   }
 
   private enqueueQuery(
     cmd: string,
     binary: boolean,
-    timeout: number
+    timeout: number,
+    pre?: string
   ): Promise<Buffer> {
-    return new Promise<Buffer>((resolve, reject) => {
-      this.queryQueue.push({ cmd, binary, timeout, resolve, reject });
+    this.clearIdleTimer();
+    const result = new Promise<Buffer>((resolve, reject) => {
+      this.queryQueue.push({ cmd, pre, binary, timeout, resolve, reject });
       this.drainQueue();
     });
+    result.then(
+      () => this.scheduleIdleClose(),
+      () => this.scheduleIdleClose()
+    );
+    return result;
   }
 
   private drainQueue(): void {
     if (this.queryRunning || this.queryQueue.length === 0) return;
     this.queryRunning = true;
 
-    const { cmd, binary, timeout, resolve, reject } = this.queryQueue.shift()!;
+    const { cmd, pre, binary, timeout, resolve, reject } =
+      this.queryQueue.shift()!;
 
     this.expectedBinaryLength = null;
     this.binaryDataStart = 0;
@@ -167,21 +256,33 @@ export class SiglentConnection {
     this.responseTimer = setTimeout(() => {
       this.clearPending();
       const err = new Error(
-        `${binary ? "Binary query" : "Query"} timeout after ${timeout}ms for command: ${cmd}`
+        `${binary ? "Binary query" : "Query"} timeout after ${timeout}ms for command: ${pre ? `${pre} (${cmd})` : cmd}`
       );
       this.queryRunning = false;
       reject(err);
       this.drainQueue();
     }, timeout);
 
-    this.socket!.write(cmd + "\n", (err) => {
-      if (err) {
-        this.clearPending();
-        this.queryRunning = false;
-        reject(new Error(`Write failed: ${err.message}`));
-        this.drainQueue();
-      }
-    });
+    const writeLine = (line: string, next?: () => void): void => {
+      this.socket!.write(line + "\n", (err) => {
+        if (err) {
+          this.clearPending();
+          this.queryRunning = false;
+          reject(new Error(`Write failed: ${err.message}`));
+          this.drainQueue();
+        } else {
+          next?.();
+        }
+      });
+    };
+
+    if (pre !== undefined) {
+      writeLine(pre, () =>
+        setTimeout(() => this.socket && writeLine(cmd), OPC_GAP_MS)
+      );
+    } else {
+      writeLine(cmd);
+    }
   }
 
   private setupSocketListeners(): void {
@@ -288,13 +389,50 @@ export class SiglentConnection {
     this.headerParsed = false;
   }
 
-  private ensureConnected(): void {
-    if (!this.isConnected()) {
+  /**
+   * Make sure there is a live connection, opening one on demand to the last
+   * host (or SIGLENT_IP) if it was closed, e.g. by the idle timeout.
+   */
+  private async ensureReady(): Promise<void> {
+    if (this.connecting) {
+      await this.connecting;
+      return;
+    }
+    if (this.isConnected()) return;
+    const host = this.host || process.env.SIGLENT_IP;
+    if (!host || this.autoConnectSuppressed) {
       throw new Error(
         "Not connected to oscilloscope. Use the 'connect' tool first."
       );
     }
+    const port = this.host
+      ? this.port
+      : parseInt(process.env.SIGLENT_PORT || String(DEFAULT_PORT), 10);
+    await this.connect(host, port);
   }
+
+  private scheduleIdleClose(): void {
+    const ms = idleTimeoutMs();
+    if (!ms || this.queryRunning || this.queryQueue.length > 0) return;
+    this.clearIdleTimer();
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (!this.queryRunning && this.queryQueue.length === 0) {
+        console.error(`Idle for ${ms / 1000}s, releasing the scope connection`);
+        this.close();
+      }
+    }, ms);
+    // Don't keep the process alive just for this timer
+    this.idleTimer.unref?.();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));

@@ -14,6 +14,7 @@ export function registerChannelTools(server: McpServer): void {
     { readOnlyHint: true },
     async ({ channel }) => {
       try {
+        await connection.checkChannel(channel);
         const [vdiv, ofst, cpl, bwl, tra, attn, unit] = await Promise.all([
           connection.query(`${channel}:VDIV?`),
           connection.query(`${channel}:OFST?`),
@@ -106,6 +107,7 @@ export function registerChannelTools(server: McpServer): void {
     { readOnlyHint: false, idempotentHint: true },
     async ({ channel, vdiv, offset, coupling, bandwidth_limit, trace, probe }) => {
       try {
+        await connection.checkChannel(channel);
         const commands: string[] = [];
 
         if (vdiv !== undefined) {

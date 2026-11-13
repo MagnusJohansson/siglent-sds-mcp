@@ -17,7 +17,8 @@ export function registerScpiTools(server: McpServer): void {
         .optional()
         .describe("Timeout in milliseconds (default 2000)"),
     },
-    { readOnlyHint: true },
+    // Not read-only: nothing stops a setter being sent through this tool
+    { readOnlyHint: false },
     async ({ command, timeout_ms }) => {
       try {
         const response = await connection.query(

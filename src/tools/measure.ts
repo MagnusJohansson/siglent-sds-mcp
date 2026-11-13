@@ -4,6 +4,9 @@ import { connection } from "../connection.js";
 
 const channelEnum = z.enum(["C1", "C2", "C3", "C4"]);
 
+// Number of measurement/statistics slots the SDS1000X-E displays
+const MAX_STAT_SLOTS = 5;
+
 const measureParam = z.enum([
   "PKPK",
   "MAX",
@@ -44,6 +47,7 @@ export function registerMeasureTools(server: McpServer): void {
     { readOnlyHint: true },
     async ({ channel, parameter }) => {
       try {
+        await connection.checkChannel(channel);
         // Install the measurement
         await connection.sendCommand(`PACU ${parameter},${channel}`);
 
@@ -89,9 +93,10 @@ export function registerMeasureTools(server: McpServer): void {
           "Action: 'on' enables statistics, 'off' disables, 'reset' clears accumulated stats, 'read' returns current statistics"
         ),
     },
-    { readOnlyHint: true },
+    { readOnlyHint: false },
     async ({ channel, parameter, action }) => {
       try {
+        await connection.checkChannel(channel);
         switch (action) {
           case "on":
             await connection.sendCommand(`PACU ${parameter},${channel}`);
@@ -135,7 +140,31 @@ export function registerMeasureTools(server: McpServer): void {
             // Small delay
             await new Promise((resolve) => setTimeout(resolve, 300));
 
-            const stats = await connection.query("PAVA? STAT1");
+            // The scope shows up to 5 measurements, each with its own
+            // statistics slot. The requested measurement isn't necessarily in
+            // slot 1, so find the slot whose label matches. Labels look like
+            // "STAT3 C2 MEAN:cur,..." (SDS1202X-E fw 1.3.27); also accept
+            // "C2:MEAN,curr=..." in case other firmware formats it that way.
+            const label = new RegExp(`\\b${channel}[ :]${parameter}[:,]`);
+            let stats = "";
+            for (let slot = 1; slot <= MAX_STAT_SLOTS; slot++) {
+              const reply = await connection.query(`PAVA? STAT${slot}`);
+              if (label.test(reply)) {
+                stats = reply;
+                break;
+              }
+            }
+            if (!stats) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `Error: no statistics slot found for ${channel} ${parameter}`,
+                  },
+                ],
+                isError: true,
+              };
+            }
             return {
               content: [
                 {
