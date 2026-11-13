@@ -44,7 +44,7 @@ Also fixed:
 
 ### Release process
 
-- Publishing to npm and GHCR is triggered by publishing a GitHub Release, not by pushing a tag. The npm workflow checks that the release tag matches `package.json` and that `repository.url` matches the repository, runs the tests, and publishes with provenance on Node 26. Pre-releases go to the npm `next` dist-tag.
+- Publishing to npm and GHCR is triggered by publishing a GitHub Release, not by pushing a tag. One `Release` workflow runs verify, npm and docker jobs in order: nothing is published unless the release tag matches `package.json` and `SERVER_VERSION`, `repository.url` matches the repository, the pre-release flag matches the version, the tagged commit is on `master`, and the tests pass. npm publishes with provenance on Node 26 (pre-releases to the `next` dist-tag); the Docker image is pushed only after npm succeeds. Dependency install scripts are disabled in the release jobs and the Docker build.
 - All GitHub Actions are pinned to commit SHAs and the Docker base image to a digest. Dependabot (with a 7-day cooldown), CodeQL and OpenSSF Scorecard workflows added.
 
 ### Added

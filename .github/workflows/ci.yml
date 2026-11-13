@@ -13,7 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 20 stays while package.json declares engines ">=20.9".
+        # 20 stays while package.json declares engines ">=20.9" (the runtime minimum).
+        # This tests the latest 20.x: the test tooling (vitest 4) needs >= 20.19.
         node-version: [20, 22, 24, 26]
     steps:
       - name: Checkout
