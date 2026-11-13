@@ -5,7 +5,7 @@
   "type": "module",
   "main": "build/index.js",
   "bin": {
-    "siglent-sds-mcp": "./build/index.js"
+    "siglent-sds-mcp": "build/index.js"
   },
   "files": [
     "build/**/*.js",
@@ -36,17 +36,16 @@
   "author": "Magnus Johansson",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
-    "sharp": "^0.34.5",
-    "zod": "^3.25.0"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "sharp": "^0.35.5",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/sharp": "^0.31.1",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.12"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.9.0"
   }
 }

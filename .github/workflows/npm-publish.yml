@@ -1,9 +1,14 @@
 name: Publish to npm
 
+# Publishing a GitHub Release is the single trigger for publishing: the
+# release notes exist before anything ships, and a draft publishes nothing.
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types: [published]
+
+# Read-only by default; the job adds only what publishing needs.
+permissions:
+  contents: read
 
 jobs:
   publish:
@@ -14,16 +19,33 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check release tag matches package.json version
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package.json version ($expected)."
+            exit 1
+          fi
+
+      # npm rejects a provenance-signed publish unless repository.url matches
+      # this repository exactly, including case.
+      - name: Check repository.url matches this repository
+        run: |
+          expected="git+https://github.com/${GITHUB_REPOSITORY}.git"
+          actual="$(node -p "require('./package.json').repository.url")"
+          if [ "$actual" != "$expected" ]; then
+            echo "package.json repository.url is $actual, expected $expected."
+            exit 1
+          fi
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
+          # Node 26 bundles npm 11.20, which supports trusted publishing (needs
+          # >= 11.5.1). No separate npm install: it would be an unpinned download.
+          node-version: 26
           registry-url: https://registry.npmjs.org
-
-      - name: Update npm
-        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
@@ -31,5 +53,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Test
+        run: npm test
+
+      # Pre-releases go to the "next" dist-tag so they don't become "latest".
       - name: Publish
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public ${{ github.event.release.prerelease && '--tag next' || '' }}

@@ -1,5 +1,11 @@
 # siglent-sds-mcp
 
+[![CI](https://github.com/MagnusJohansson/siglent-sds-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/MagnusJohansson/siglent-sds-mcp/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/MagnusJohansson/siglent-sds-mcp/actions/workflows/codeql.yml/badge.svg)](https://github.com/MagnusJohansson/siglent-sds-mcp/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/MagnusJohansson/siglent-sds-mcp/badge)](https://scorecard.dev/viewer/?uri=github.com/MagnusJohansson/siglent-sds-mcp)
+[![npm](https://img.shields.io/npm/v/siglent-sds-mcp)](https://www.npmjs.com/package/siglent-sds-mcp)
+[![License: MIT](https://img.shields.io/github/license/MagnusJohansson/siglent-sds-mcp)](LICENSE)
+
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that lets AI assistants control Siglent oscilloscopes over your local network. Connect Claude to your bench and measure, capture, and configure your scope through natural language.
 
 ## Overview
@@ -400,6 +406,16 @@ npm run inspector   # Launch with MCP Inspector for debugging
 npm test            # Unit, integration and end-to-end security tests (SCPI simulator)
 npm run hardware-check -- <scope-ip>   # Security checks against a real scope; restores the settings it changes
 ```
+
+### Releasing
+
+Publishing is triggered by **publishing a GitHub Release**, not by pushing a tag:
+
+1. Bump `version` in `package.json` and `SERVER_VERSION` in `src/server.ts`, and add a `CHANGELOG.md` section. Merge to `master`.
+2. Create a release (draft first) with tag `vX.Y.Z` on `master`, using the changelog section as the release notes.
+3. Publish the release. This runs the npm publish (tests first, with provenance) and the GHCR image build.
+
+The npm workflow fails if the tag doesn't match the `package.json` version, or if `repository.url` doesn't match the repository exactly. A pre-release publishes to the npm `next` dist-tag, and doesn't move the Docker `latest` tag. A draft release publishes nothing.
 
 ### Docker (local build)
 
