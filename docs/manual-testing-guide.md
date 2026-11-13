@@ -397,6 +397,8 @@ Parameters: { "command": "TDIV?", "timeout_ms": 3000 }
 
 ### 6.3 scpi_command
 
+> Requires `SIGLENT_ALLOW_RAW_SCPI=true` and `SIGLENT_IP` in the server's environment. Without them the tool is not listed.
+
 **Action:** Send a command with no response.
 
 ```

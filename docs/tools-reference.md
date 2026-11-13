@@ -70,7 +70,7 @@ Control the acquisition state and configure timebase/trigger settings. All param
 | `command` | enum | No | `run` (ARM), `stop`, `single`, `auto` |
 | `timebase` | string | No | Time per division with unit (e.g. `1US`, `500NS`, `10MS`). Range: 1NS–100S |
 | `trigger_mode` | enum | No | `AUTO`, `NORM`, `SINGLE`, `STOP` |
-| `trigger_source` | enum | No | `C1`, `C2`, `C3`, `C4`, `EX`, `EX5` |
+| `trigger_source` | enum | No | `C1`, `C2`, `C3`, `C4`, `EX`, `EX5`. Selects an **edge** trigger on that source (`TRSE EDGE,SR,<source>`), replacing other trigger types such as pulse or serial. |
 | `trigger_level` | string | No | Trigger level voltage (e.g. `1.5V`, `500mV`) |
 | `trigger_slope` | enum | No | `POS` (rising), `NEG` (falling), `WINDOW` |
 | `trigger_delay` | string | No | Horizontal position (e.g. `0S`, `-4.8US`) |
@@ -79,7 +79,7 @@ Control the acquisition state and configure timebase/trigger settings. All param
 
 Query the current acquisition state. No parameters.
 
-Returns: acquisition status, sample rate, timebase, trigger delay, trigger mode, trigger select, trigger level, and trigger slope.
+Returns: acquisition status, sample rate, timebase, trigger delay, trigger mode, trigger select, and the trigger source with its level and slope (`trigger_source`, `trigger_level`, `trigger_slope`).
 
 ---
 
@@ -161,23 +161,23 @@ Capture the oscilloscope screen as a PNG image. Returns a base64-encoded image t
 
 ## SCPI Escape Hatch
 
-For commands not covered by the built-in tools, send arbitrary SCPI directly.
+For queries and commands not covered by the built-in tools.
 
 ### `scpi_query`
 
-Send a SCPI query and return the response.
+Send a SCPI query and return the response. Only queries are accepted: a single header immediately followed by `?`. Parameters after `?` are only accepted for `PAVA?` (one measurement name or statistics slot, e.g. `C1:PAVA? FREQ`, `PAVA? STAT1`). Of the `*` commands, only `*IDN?`, `*OPC?`, `*ESR?`, `*STB?`, `*ESE?`, `*SRE?` and `*OPT?` are accepted.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `command` | string | Yes | — | SCPI query (e.g. `*IDN?`, `C1:VDIV?`, `SARA?`) |
-| `timeout_ms` | number | No | `2000` | Response timeout in milliseconds |
+| `timeout_ms` | integer | No | `5000` | Response timeout in milliseconds (500–60000). After a timeout the connection is reset. |
 
 > Note: `CHDR` is set to `OFF` on connect, so responses contain only values (no command headers).
 
 ### `scpi_command`
 
-Send a SCPI command with no response expected.
+**Only registered when `SIGLENT_ALLOW_RAW_SCPI=true`** (which also requires `SIGLENT_IP` or `SIGLENT_ALLOWED_HOSTS`). Send a single SCPI command with no response expected. Newlines and `;` are rejected; a command that produces a reply (i.e. a query) is rejected and the connection reset.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `command` | string | Yes | SCPI command (e.g. `*RST`, `ARM`, `C1:VDIV 500mV`) |
+| `command` | string | Yes | SCPI command (e.g. `ARM`, `C1:VDIV 500mV`) |

@@ -3,6 +3,7 @@ import { createTestServer, callTool, getText } from "../helpers.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 const mockConnection = vi.hoisted(() => ({
+  configure: vi.fn(),
   isConnected: vi.fn(() => true),
   getConnectionInfo: vi.fn(() => "192.168.1.126:5025"),
   connect: vi.fn(async () => "Siglent,SDS1104X-E,SDS1ECAX12345,8.2.6.1.37R1"),
@@ -78,6 +79,6 @@ describe("connect", () => {
     const result = await callTool(client, "connect", { host: "10.0.0.1" });
     const text = getText(result);
     expect(text).toContain("Connected to 10.0.0.1");
-    expect(mockConnection.connect).toHaveBeenCalledWith("10.0.0.1", undefined);
+    expect(mockConnection.connect).toHaveBeenCalledWith("10.0.0.1", 5025);
   });
 });

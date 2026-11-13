@@ -108,9 +108,13 @@ Replace `/path/to/siglent-sds-mcp` with the actual path to your clone.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SIGLENT_IP` | No | — | Oscilloscope IP address for auto-connect on startup |
+| `SIGLENT_IP` | No | — | Oscilloscope IP address for auto-connect on startup. Always allowed as a `connect` target. |
 | `SIGLENT_PORT` | No | `5025` | TCP port (only change if your setup differs) |
+| `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts `connect` may reach besides `SIGLENT_IP`. If neither is set, only private-LAN IP addresses are accepted. |
+| `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Registers the raw `scpi_command` tool. Requires `SIGLENT_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts. |
 | `SIGLENT_IDLE_TIMEOUT` | No | `0` (never) | Seconds of inactivity after which the scope connection is released. The next tool call reconnects automatically. |
+
+Invalid values (e.g. a non-numeric port) stop the server at startup instead of being ignored.
 
 ### Auto-Connect Behavior
 
@@ -118,7 +122,7 @@ If `SIGLENT_IP` is set, the server attempts to connect to the scope immediately 
 
 If `SIGLENT_IP` is not set, the server starts without a scope connection. Use the `connect` tool to connect when ready.
 
-If the connection is closed (by the idle timeout, or the scope restarting), the next tool call reconnects automatically to the last host. An explicit `disconnect` turns this off until `connect` is called again.
+If the connection is closed (by the idle timeout, a reset after a timeout, or the scope restarting), the next tool call reconnects automatically to the last host, subject to the same host policy as `connect`. An explicit `disconnect` turns this off until `connect` is called again.
 
 ### One Client at a Time
 
@@ -306,7 +310,7 @@ ChatGPT Desktop only supports remote HTTPS MCP servers (called "connectors"), no
 
 ## Tools
 
-12 tools across 6 categories. See [docs/tools-reference.md](docs/tools-reference.md) for full parameter details.
+12 tools across 6 categories by default, plus `scpi_command` when raw SCPI is enabled. See [docs/tools-reference.md](docs/tools-reference.md) for full parameter details.
 
 | Category | Tool | Description |
 |----------|------|-------------|
@@ -321,7 +325,25 @@ ChatGPT Desktop only supports remote HTTPS MCP servers (called "connectors"), no
 | | `measure_statistics` | Enable/read/reset measurement statistics |
 | Waveform | `get_waveform` | Download voltage/time data arrays |
 | | `screenshot` | Capture scope screen as PNG |
-| SCPI | `scpi_query` / `scpi_command` | Send arbitrary SCPI commands |
+| SCPI | `scpi_query` | Send a SCPI query (queries only) |
+| | `scpi_command` | Send a raw SCPI command. **Off by default**; see [Security](#security) |
+
+## Security
+
+Tool arguments come from a language model, which may have been steered by content it read (a datasheet, a web page, a previous tool result). The server therefore treats every argument as untrusted and enforces its checks in the connection layer, the single point every command passes through before it reaches the scope. See [docs/threat-model.md](docs/threat-model.md) for the full analysis.
+
+- **One command per write.** Newlines, other control characters and `;` are rejected in every command and query, so a parameter can't smuggle in a second command.
+- **`scpi_query` only sends queries:** a single header immediately followed by `?`. Parameters after `?` are only accepted for `PAVA?` (e.g. `C1:PAVA? FREQ`). `*` commands only as pure queries (`*IDN?`, `*OPC?`, ...), and known action commands (`ASET?`, `ARM`, ...) are refused.
+- **Strict formats** for every free-text parameter: voltages (`500mV`), times (`1US`).
+- **`connect` is restricted** to `SIGLENT_IP`, `SIGLENT_ALLOWED_HOSTS`, or, if neither is set, private-LAN IP addresses, on the instrument port. Loopback, link-local (cloud metadata) and host names are refused. The same check applies to automatic reconnects.
+- **Raw `scpi_command` is off by default.** Set `SIGLENT_ALLOW_RAW_SCPI=true` to enable it; it also requires named hosts (`*` is not accepted).
+- **Replies stay matched to their queries.** After a timeout, or if a command unexpectedly produces output, the connection is reset so a late reply can't be read as the answer to the next query.
+
+**What it does not protect against:**
+
+- **Settings that can harm the scope or the circuit.** `configure_channel` can switch a channel to 50 Ω input coupling (`A50`/`D50`) on models that have it. A signal above the 50 Ω input's rating can then exceed what the input is specified for; check your scope's manual. With raw SCPI enabled, the model can change any setting.
+- **Other clients on port 5025.** The instrument has no authentication: anyone with network access to it can control it directly, without this server. Network segmentation is the control for that.
+- **Who is calling.** In stdio mode, whoever can start the server has full access.
 
 ## Example Conversations
 
@@ -363,6 +385,7 @@ Claude Code <-- stdio/JSON-RPC --> siglent-sds-mcp <-- TCP/SCPI --> Oscilloscope
 
 - **Transport:** MCP over stdio (JSON-RPC 2.0)
 - **Protocol:** SCPI commands over raw TCP sockets, newline-terminated
+- **Security checks:** Every command and query passes through the connection layer, which checks it before writing to the socket (see [Security](#security)).
 - **Query Queue:** All SCPI queries are serialized through an internal queue. The oscilloscope processes one command at a time, so even when tools issue parallel requests (via `Promise.all`), the queue ensures they're sent sequentially.
 - **Binary Block Parsing:** Waveform and screenshot data use IEEE 488.2 definite-length block format (`#9XXXXXXXXX` + data bytes + `\n\n`). The connection layer detects and parses these automatically.
 - **Voltage Reconstruction:** Raw ADC codes are converted to voltages: `code * (vdiv / 25) - offset`, with two's complement handling for signed values.
@@ -374,6 +397,8 @@ npm run build       # Compile TypeScript
 npm run watch       # Watch mode — recompile on changes
 npm run dev         # Build and run
 npm run inspector   # Launch with MCP Inspector for debugging
+npm test            # Unit, integration and end-to-end security tests (SCPI simulator)
+npm run hardware-check -- <scope-ip>   # Security checks against a real scope; restores the settings it changes
 ```
 
 ### Docker (local build)

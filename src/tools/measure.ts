@@ -44,7 +44,8 @@ export function registerMeasureTools(server: McpServer): void {
         "Measurement type: PKPK, MAX, MIN, AMPL, TOP, BASE, CMEAN, MEAN, RMS, CRMS, OVSN, FPRE, OVSP, RPRE, PER, FREQ, PWID, NWID, RISE, FALL, WID, DUTY, NDUTY, ALL"
       ),
     },
-    { readOnlyHint: true },
+    // Not read-only: installs the measurement on the scope (PACU).
+    { readOnlyHint: false, idempotentHint: true },
     async ({ channel, parameter }) => {
       try {
         await connection.checkChannel(channel);

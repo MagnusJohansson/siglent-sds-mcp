@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { connection } from "../connection.js";
+import { signedVoltageString, voltageString } from "../security/formats.js";
 
 const channelEnum = z.enum(["C1", "C2", "C3", "C4"]);
 
@@ -71,18 +72,12 @@ export function registerChannelTools(server: McpServer): void {
     "Configure an analog channel's parameters. Only specified parameters will be changed.",
     {
       channel: channelEnum.describe("Channel to configure (C1, C2, C3, or C4)"),
-      vdiv: z
-        .string()
-        .optional()
-        .describe(
-          "Volts per division with unit (e.g. '500mV', '1V', '2V'). Range: 500uV to 10V"
-        ),
-      offset: z
-        .string()
-        .optional()
-        .describe(
-          "Vertical offset with unit (e.g. '0V', '-500mV', '1.5V')"
-        ),
+      vdiv: voltageString(
+        "Volts per division with unit (e.g. '500mV', '1V', '2V'). Range: 500uV to 10V"
+      ).optional(),
+      offset: signedVoltageString(
+        "Vertical offset with unit (e.g. '0V', '-500mV', '1.5V')"
+      ).optional(),
       coupling: z
         .enum(["A1M", "A50", "D1M", "D50", "GND"])
         .optional()
@@ -99,6 +94,8 @@ export function registerChannelTools(server: McpServer): void {
         .describe("Turn channel display on (true) or off (false)"),
       probe: z
         .number()
+        .positive()
+        .max(10_000)
         .optional()
         .describe(
           "Probe attenuation factor (e.g. 1, 10, 100, 1000)"

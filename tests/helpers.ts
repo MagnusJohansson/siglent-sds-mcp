@@ -1,38 +1,22 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { registerConnectionTools } from "../src/tools/connection.js";
-import { registerChannelTools } from "../src/tools/channel.js";
-import { registerAcquisitionTools } from "../src/tools/acquisition.js";
-import { registerMeasureTools } from "../src/tools/measure.js";
-import { registerWaveformTools } from "../src/tools/waveform.js";
-import { registerScpiTools } from "../src/tools/scpi.js";
+import { loadConfig } from "../src/config.js";
+import { createServer } from "../src/server.js";
 
-export async function createTestServer() {
-  const server = new McpServer({
-    name: "siglent-sds-mcp-test",
-    version: "1.0.0",
-  });
-
-  registerConnectionTools(server);
-  registerChannelTools(server);
-  registerAcquisitionTools(server);
-  registerMeasureTools(server);
-  registerWaveformTools(server);
-  registerScpiTools(server);
+/** Start the real MCP server with config built from the given env, linked to an in-memory client. */
+export async function createTestServer(env: Record<string, string> = {}) {
+  const config = loadConfig(env);
+  const server = createServer(config);
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-
   const client = new Client({ name: "test-client", version: "1.0.0" });
 
-  await Promise.all([
-    client.connect(clientTransport),
-    server.connect(serverTransport),
-  ]);
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
 
   return {
     client,
     server,
+    config,
     async cleanup() {
       await client.close();
       await server.close();
@@ -40,14 +24,13 @@ export async function createTestServer() {
   };
 }
 
-/** Helper to call a tool and return the text content from the first content block */
+/** Helper to call a tool and return the result */
 export async function callTool(
   client: Client,
   name: string,
   args: Record<string, unknown> = {}
 ) {
-  const result = await client.callTool({ name, arguments: args });
-  return result;
+  return client.callTool({ name, arguments: args });
 }
 
 /** Extract the text from the first text content block */

@@ -1,6 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as net from "node:net";
-import { SiglentConnection, channelCountFromModel } from "../../src/connection.js";
+import {
+  SiglentConnection,
+  channelCountFromModel,
+  type ConnectionOptions,
+} from "../../src/connection.js";
+
+/** Options that let the connection reach the fake scope on its random local port. */
+function local(port: number, extra: Partial<ConnectionOptions> = {}): Partial<ConnectionOptions> {
+  return { hostPolicy: { allowedHosts: ["127.0.0.1"], allowedPorts: [port] }, ...extra };
+}
 
 /**
  * Fake scope on a local TCP port. Records each chunk it receives separately
@@ -33,7 +42,7 @@ describe("SiglentConnection.sendCommand", () => {
 
   beforeEach(async () => {
     scope = await startFakeScope(100);
-    conn = new SiglentConnection();
+    conn = new SiglentConnection(local(scope.port));
     await conn.connect("127.0.0.1", scope.port);
     scope.chunks.length = 0;
   });
@@ -81,18 +90,15 @@ describe("channelCountFromModel", () => {
 describe("SiglentConnection connection management", () => {
   let scope: Awaited<ReturnType<typeof startFakeScope>>;
   let conn: SiglentConnection;
-  const savedIdle = process.env.SIGLENT_IDLE_TIMEOUT;
 
   afterEach(async () => {
     conn?.disconnect();
-    if (savedIdle === undefined) delete process.env.SIGLENT_IDLE_TIMEOUT;
-    else process.env.SIGLENT_IDLE_TIMEOUT = savedIdle;
     await new Promise((r) => scope.server.close(r));
   });
 
   it("rejects channels the model doesn't have", async () => {
     scope = await startFakeScope(0); // identifies as SDS1202X-E
-    conn = new SiglentConnection();
+    conn = new SiglentConnection(local(scope.port));
     await conn.connect("127.0.0.1", scope.port);
     await expect(conn.checkChannel("C2")).resolves.toBeUndefined();
     await expect(conn.checkChannel("C3")).rejects.toThrow(
@@ -102,7 +108,7 @@ describe("SiglentConnection connection management", () => {
 
   it("explains a scope that accepts the connection but never answers", async () => {
     scope = await startFakeScope(0, { silent: true });
-    conn = new SiglentConnection();
+    conn = new SiglentConnection(local(scope.port));
     await expect(conn.connect("127.0.0.1", scope.port)).rejects.toThrow(
       /probably in use by another program/
     );
@@ -110,7 +116,7 @@ describe("SiglentConnection connection management", () => {
 
   it("gives calls made during a failing connect the same busy error", async () => {
     scope = await startFakeScope(0, { silent: true });
-    conn = new SiglentConnection();
+    conn = new SiglentConnection(local(scope.port));
     // Like the startup auto-connect: fire-and-forget, then a tool call arrives
     const startup = conn.connect("127.0.0.1", scope.port).catch(() => {});
     await new Promise((r) => setTimeout(r, 50));
@@ -121,9 +127,8 @@ describe("SiglentConnection connection management", () => {
   }, 10_000);
 
   it("releases the connection when idle and reconnects on the next call", async () => {
-    process.env.SIGLENT_IDLE_TIMEOUT = "0.2";
     scope = await startFakeScope(0);
-    conn = new SiglentConnection();
+    conn = new SiglentConnection(local(scope.port, { idleTimeoutMs: 200 }));
     await conn.connect("127.0.0.1", scope.port);
     expect(conn.isConnected()).toBe(true);
 
@@ -136,9 +141,8 @@ describe("SiglentConnection connection management", () => {
   });
 
   it("stays connected when no idle timeout is set", async () => {
-    delete process.env.SIGLENT_IDLE_TIMEOUT;
     scope = await startFakeScope(0);
-    conn = new SiglentConnection();
+    conn = new SiglentConnection(local(scope.port));
     await conn.connect("127.0.0.1", scope.port);
     await new Promise((r) => setTimeout(r, 300));
     expect(conn.isConnected()).toBe(true);
@@ -146,7 +150,7 @@ describe("SiglentConnection connection management", () => {
 
   it("does not reconnect after an explicit disconnect", async () => {
     scope = await startFakeScope(0);
-    conn = new SiglentConnection();
+    conn = new SiglentConnection(local(scope.port));
     await conn.connect("127.0.0.1", scope.port);
     conn.disconnect();
     await expect(conn.query("*IDN?")).rejects.toThrow("Not connected");

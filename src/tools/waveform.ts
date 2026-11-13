@@ -15,6 +15,9 @@ export function registerWaveformTools(server: McpServer): void {
       ),
       max_points: z
         .number()
+        .int()
+        .min(1)
+        .max(1_000_000)
         .optional()
         .describe(
           "Maximum number of data points to return (default 1000). Higher values give more detail but use more context."
