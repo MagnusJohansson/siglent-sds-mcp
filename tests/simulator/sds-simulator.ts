@@ -32,7 +32,9 @@ export class SdsSimulator {
   private sockets = new Set<net.Socket>();
   private lines: string[] = [];
   private perConnection: string[][] = [];
-  private state: Record<string, string> = { ...DEFAULT_STATE };
+  // A Map, not an object: keys come from the wire, and a key like "__proto__"
+  // must stay an ordinary key.
+  private state = new Map<string, string>(Object.entries(DEFAULT_STATE));
   /** Delay before answering *OPC?, to simulate a slow command. */
   opcDelayMs = 0;
 
@@ -82,11 +84,11 @@ export class SdsSimulator {
   }
 
   get(key: string): string | undefined {
-    return this.state[key];
+    return this.state.get(key);
   }
 
   resetState(): void {
-    this.state = { ...DEFAULT_STATE };
+    this.state = new Map(Object.entries(DEFAULT_STATE));
     this.opcDelayMs = 0;
   }
 
@@ -119,7 +121,7 @@ export class SdsSimulator {
     // undocumented firmware command. Only the acknowledgement check catches it.
     if (upper.startsWith("ECHO ")) return this.reply(sock, line.slice(5));
     if (upper === "*RST") {
-      this.state = { ...DEFAULT_STATE };
+      this.state = new Map(Object.entries(DEFAULT_STATE));
       return;
     }
 
@@ -127,12 +129,12 @@ export class SdsSimulator {
     if (q) {
       const key = q[1].toUpperCase();
       if (key.endsWith("PAVA")) return this.reply(sock, "1.000000E+03");
-      return this.reply(sock, this.state[key] ?? "0");
+      return this.reply(sock, this.state.get(key) ?? "0");
     }
 
     const set = /^([A-Z0-9:_]+) (.+)$/i.exec(line);
     if (set) {
-      this.state[set[1].toUpperCase()] = set[2];
+      this.state.set(set[1].toUpperCase(), set[2]);
     }
   }
 }
