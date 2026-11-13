@@ -1,4 +1,10 @@
 import * as net from "node:net";
+import {
+  assertBinaryQuery,
+  assertIsCommand,
+  assertIsQuery,
+} from "./security/scpi-guard.js";
+import { assertConnectAllowed, type HostPolicy } from "./security/host-policy.js";
 
 const DEFAULT_PORT = 5025;
 const DEFAULT_TIMEOUT = 5000;
@@ -7,20 +13,45 @@ const BINARY_TIMEOUT = 30000;
 // reads; a write callback alone doesn't stop the receiver coalescing them.
 const OPC_GAP_MS = 20;
 
-/**
- * Seconds of inactivity after which the socket is closed (0 = never). The
- * scope serves one TCP client at a time, so holding the connection open
- * blocks any other client — e.g. a second MCP host using the same scope.
- */
-function idleTimeoutMs(): number {
-  const secs = parseFloat(process.env.SIGLENT_IDLE_TIMEOUT || "0");
-  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 0;
+export interface ConnectionOptions {
+  /** Where connect() may go. Enforced here, so every connect path is covered. */
+  hostPolicy: HostPolicy;
+  /** Host used when reconnecting before any explicit connect (SIGLENT_IP). */
+  defaultHost?: string;
+  defaultPort: number;
+  /** Release the connection after this many ms without traffic (0 = never). */
+  idleTimeoutMs: number;
+  /** How long a command may take before its *OPC? is considered lost. */
+  commandTimeoutMs: number;
 }
+
+const DEFAULT_OPTIONS: ConnectionOptions = {
+  // Until configured: private-LAN IP addresses on the standard port only.
+  hostPolicy: { allowedHosts: [], allowedPorts: [DEFAULT_PORT] },
+  defaultPort: DEFAULT_PORT,
+  idleTimeoutMs: 0,
+  commandTimeoutMs: DEFAULT_TIMEOUT,
+};
 
 /** Channel count from the model name, e.g. SDS1202X-E -> 2, SDS1104X-E -> 4 */
 export function channelCountFromModel(model: string): number | undefined {
   const m = /SDS\d{3}(\d)/i.exec(model);
   return m ? parseInt(m[1], 10) : undefined;
+}
+
+/**
+ * *OPC? answers "1" (or "*OPC 1" while command headers are still on).
+ * Anything else means another reply arrived first, e.g. from a command that
+ * produced output; the real "1" is still on its way and would answer the
+ * next query.
+ */
+function opcProblem(cmd: string, reply: Buffer): string | undefined {
+  const text = reply.toString("utf-8").trim();
+  if (/^(\*OPC\s+)?1$/i.test(text)) return undefined;
+  return (
+    `Unexpected reply to "${cmd}": ${JSON.stringify(text.slice(0, 80))}. ` +
+    "Commands must not produce output (use scpi_query for queries). The connection was reset."
+  );
 }
 
 interface QueuedQuery {
@@ -29,11 +60,18 @@ interface QueuedQuery {
   pre?: string;
   binary: boolean;
   timeout: number;
+  /**
+   * Checks the reply before anything else is sent. Returns an error message
+   * if the reply is out of step; the connection is then reset and queued
+   * work is rejected without reaching the scope.
+   */
+  validate?: (reply: Buffer) => string | undefined;
   resolve: (value: Buffer) => void;
   reject: (reason: Error) => void;
 }
 
 export class SiglentConnection {
+  private options: ConnectionOptions;
   private socket: net.Socket | null = null;
   private host = "";
   private port = DEFAULT_PORT;
@@ -51,8 +89,26 @@ export class SiglentConnection {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   // Set by an explicit disconnect() so we don't silently reconnect afterwards
   private autoConnectSuppressed = false;
+  /**
+   * Incremented on every connect attempt. An attempt superseded by a newer one
+   * (e.g. the startup auto-connect still initializing when the `connect` tool
+   * is called) must not install its socket or tear down the newer one.
+   */
+  private connectGeneration = 0;
 
-  async connect(host: string, port: number = DEFAULT_PORT): Promise<string> {
+  constructor(options: Partial<ConnectionOptions> = {}) {
+    this.options = { ...DEFAULT_OPTIONS, ...options };
+  }
+
+  /** Apply the server configuration (host policy, defaults, timeouts). */
+  configure(options: Partial<ConnectionOptions>): void {
+    this.options = { ...this.options, ...options };
+  }
+
+  async connect(host: string, port: number = this.options.defaultPort): Promise<string> {
+    // Every connect path (tool, auto-connect, reconnect) passes through here.
+    assertConnectAllowed(host, port, this.options.hostPolicy);
+
     // Track the attempt so tool calls made meanwhile wait for it (and get its
     // error) instead of queueing on a socket that may not initialize.
     const attempt = this.openConnection(host, port);
@@ -60,11 +116,19 @@ export class SiglentConnection {
     try {
       return await attempt;
     } finally {
-      if (this.connecting === attempt) this.connecting = null;
+      if (this.connecting === attempt) {
+        this.connecting = null;
+        // The idle timer is held off during the handshake (see
+        // scheduleIdleClose); arm it now that the connection is up.
+        this.scheduleIdleClose();
+      }
     }
   }
 
   private async openConnection(host: string, port: number): Promise<string> {
+    const generation = ++this.connectGeneration;
+    const superseded = () => generation !== this.connectGeneration;
+
     if (this.socket) {
       this.close();
     }
@@ -83,6 +147,12 @@ export class SiglentConnection {
 
       socket.on("connect", async () => {
         clearTimeout(connectTimeout);
+        if (superseded()) {
+          // The scope serves one client at a time: don't hold it open.
+          socket.destroy();
+          reject(new Error("Connection attempt superseded by a newer connect."));
+          return;
+        }
         // Remove the connect-phase error handler before installing runtime handlers
         socket.removeAllListeners("error");
         this.socket = socket;
@@ -91,22 +161,27 @@ export class SiglentConnection {
         try {
           // Drain the welcome banner the scope sends on TCP connect
           await this.delay(200);
+          if (superseded()) throw new Error("superseded by a newer connect");
           this.dataBuffer = Buffer.alloc(0);
 
           // Set CHDR OFF for clean numeric responses
-          await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, "CHDR OFF");
+          await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, "CHDR OFF", (r) =>
+            opcProblem("CHDR OFF", r)
+          );
           await this.delay(100);
+          if (superseded()) throw new Error("superseded by a newer connect");
 
           // Query identification
-          const idn = (
-            await this.enqueueQuery("*IDN?", false, DEFAULT_TIMEOUT)
-          )
+          const idn = (await this.enqueueQuery("*IDN?", false, DEFAULT_TIMEOUT))
             .toString("utf-8")
             .trim();
+          if (superseded()) throw new Error("superseded by a newer connect");
           this.model = idn.split(",")[1]?.trim() ?? "";
           resolve(idn);
         } catch (err) {
-          this.close();
+          // Only the current attempt may tear down the shared connection;
+          // a superseded one would otherwise kill the newer socket.
+          if (!superseded()) this.close();
           const msg = err instanceof Error ? err.message : String(err);
           reject(
             new Error(
@@ -136,16 +211,16 @@ export class SiglentConnection {
     this.close();
   }
 
-  private close(): void {
+  private close(reason = "Connection closed"): void {
     this.clearIdleTimer();
     const pending = this.queryQueue.splice(0);
     this.queryRunning = false;
     if (this.responseReject) {
-      this.responseReject(new Error("Connection closed"));
+      this.responseReject(new Error(reason));
     }
     this.clearPending();
     for (const q of pending) {
-      q.reject(new Error("Connection closed"));
+      q.reject(new Error(reason));
     }
     if (this.socket) {
       this.socket.removeAllListeners();
@@ -186,6 +261,9 @@ export class SiglentConnection {
   }
 
   async sendCommand(cmd: string): Promise<void> {
+    // The connection is the single choke point to the instrument, so this
+    // check applies regardless of which tool built the command.
+    assertIsCommand(cmd);
     await this.ensureReady();
     // The scope silently drops commands that arrive while it is still applying
     // the previous one (e.g. a VDIV change takes ~250ms on SDS1202X-E fw 1.3.27).
@@ -195,19 +273,22 @@ export class SiglentConnection {
     // The two must be separate writes: if "*OPC?" arrives in the same packet
     // the scope mis-parses the command's numeric argument and clamps it
     // (e.g. "TDIV 50US" becomes 1ns).
-    await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, cmd);
+    await this.enqueueQuery("*OPC?", false, this.options.commandTimeoutMs, cmd, (r) =>
+      opcProblem(cmd, r)
+    );
   }
 
   async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
+    // A query must be structurally a query; otherwise "C1:VDIV 5V" sent via a
+    // read-only tool would change state and simply time out waiting for a reply.
+    assertIsQuery(cmd);
     await this.ensureReady();
     const buf = await this.enqueueQuery(cmd, false, timeout);
     return buf.toString("utf-8").trim();
   }
 
-  async queryBinary(
-    cmd: string,
-    timeout: number = BINARY_TIMEOUT
-  ): Promise<Buffer> {
+  async queryBinary(cmd: string, timeout: number = BINARY_TIMEOUT): Promise<Buffer> {
+    assertBinaryQuery(cmd);
     await this.ensureReady();
     return this.enqueueQuery(cmd, true, timeout);
   }
@@ -216,11 +297,12 @@ export class SiglentConnection {
     cmd: string,
     binary: boolean,
     timeout: number,
-    pre?: string
+    pre?: string,
+    validate?: (reply: Buffer) => string | undefined
   ): Promise<Buffer> {
     this.clearIdleTimer();
     const result = new Promise<Buffer>((resolve, reject) => {
-      this.queryQueue.push({ cmd, pre, binary, timeout, resolve, reject });
+      this.queryQueue.push({ cmd, pre, binary, timeout, validate, resolve, reject });
       this.drainQueue();
     });
     result.then(
@@ -232,10 +314,14 @@ export class SiglentConnection {
 
   private drainQueue(): void {
     if (this.queryRunning || this.queryQueue.length === 0) return;
+    if (!this.socket) {
+      const pending = this.queryQueue.splice(0);
+      for (const q of pending) q.reject(new Error("Connection closed"));
+      return;
+    }
     this.queryRunning = true;
 
-    const { cmd, pre, binary, timeout, resolve, reject } =
-      this.queryQueue.shift()!;
+    const { cmd, pre, binary, timeout, validate, resolve, reject } = this.queryQueue.shift()!;
 
     this.expectedBinaryLength = null;
     this.binaryDataStart = 0;
@@ -244,6 +330,14 @@ export class SiglentConnection {
 
     this.responseResolve = (buf) => {
       this.queryRunning = false;
+      // Validate before starting the next queued operation: if this reply is
+      // out of step, nothing else may reach the scope on this connection.
+      const problem = validate?.(buf);
+      if (problem) {
+        reject(new Error(problem));
+        this.close("Connection reset: an earlier reply was out of step");
+        return;
+      }
       resolve(buf);
       this.drainQueue();
     };
@@ -255,16 +349,24 @@ export class SiglentConnection {
 
     this.responseTimer = setTimeout(() => {
       this.clearPending();
-      const err = new Error(
-        `${binary ? "Binary query" : "Query"} timeout after ${timeout}ms for command: ${pre ? `${pre} (${cmd})` : cmd}`
-      );
       this.queryRunning = false;
-      reject(err);
-      this.drainQueue();
+      reject(
+        new Error(
+          `${binary ? "Binary query" : "Query"} timeout after ${timeout}ms for command: ${pre ? `${pre} (${cmd})` : cmd}. ` +
+            "The connection was reset; the next call reconnects."
+        )
+      );
+      // A late reply would otherwise be read as the answer to the next query.
+      // Resetting the connection discards it with the old socket.
+      this.close("Connection reset after a timeout");
     }, timeout);
 
+    // Both writes go to this socket only. If the connection is reset and a
+    // new one opened during the gap below, the delayed *OPC? must not land
+    // in the new session.
+    const socket = this.socket;
     const writeLine = (line: string, next?: () => void): void => {
-      this.socket!.write(line + "\n", (err) => {
+      socket.write(line + "\n", (err) => {
         if (err) {
           this.clearPending();
           this.queryRunning = false;
@@ -278,7 +380,9 @@ export class SiglentConnection {
 
     if (pre !== undefined) {
       writeLine(pre, () =>
-        setTimeout(() => this.socket && writeLine(cmd), OPC_GAP_MS)
+        setTimeout(() => {
+          if (this.socket === socket && !socket.destroyed) writeLine(cmd);
+        }, OPC_GAP_MS)
       );
     } else {
       writeLine(cmd);
@@ -391,7 +495,9 @@ export class SiglentConnection {
 
   /**
    * Make sure there is a live connection, opening one on demand to the last
-   * host (or SIGLENT_IP) if it was closed, e.g. by the idle timeout.
+   * host (or the configured SIGLENT_IP) if it was closed, e.g. by the idle
+   * timeout or a reset after a timeout. Goes through connect(), so the host
+   * policy applies to reconnects too.
    */
   private async ensureReady(): Promise<void> {
     if (this.connecting) {
@@ -399,21 +505,20 @@ export class SiglentConnection {
       return;
     }
     if (this.isConnected()) return;
-    const host = this.host || process.env.SIGLENT_IP;
+    const host = this.host || this.options.defaultHost;
     if (!host || this.autoConnectSuppressed) {
-      throw new Error(
-        "Not connected to oscilloscope. Use the 'connect' tool first."
-      );
+      throw new Error("Not connected to oscilloscope. Use the 'connect' tool first.");
     }
-    const port = this.host
-      ? this.port
-      : parseInt(process.env.SIGLENT_PORT || String(DEFAULT_PORT), 10);
+    const port = this.host ? this.port : this.options.defaultPort;
     await this.connect(host, port);
   }
 
   private scheduleIdleClose(): void {
-    const ms = idleTimeoutMs();
-    if (!ms || this.queryRunning || this.queryQueue.length > 0) return;
+    const ms = this.options.idleTimeoutMs;
+    // Not during a connect: the handshake pauses between its own queries, and
+    // a short idle timeout would otherwise close the socket mid-handshake.
+    if (!ms || this.connecting || !this.isConnected()) return;
+    if (this.queryRunning || this.queryQueue.length > 0) return;
     this.clearIdleTimer();
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
@@ -432,7 +537,6 @@ export class SiglentConnection {
       this.idleTimer = null;
     }
   }
-
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));

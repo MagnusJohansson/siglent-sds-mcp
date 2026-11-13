@@ -1,26 +1,30 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { ServerConfig } from "../config.js";
 import { connection } from "../connection.js";
 
-export function registerConnectionTools(server: McpServer): void {
+export function registerConnectionTools(server: McpServer, config: ServerConfig): void {
   server.tool(
     "connect",
-    "Connect to a Siglent oscilloscope over TCP. Returns device identification on success.",
+    "Connect to a Siglent oscilloscope over TCP. Returns device identification on success. " +
+      "Only the configured oscilloscope (SIGLENT_IP), hosts in SIGLENT_ALLOWED_HOSTS, or, if neither is set, " +
+      "private-LAN IP addresses are accepted, on the instrument port.",
     {
       host: z
         .string()
+        .max(253)
         .optional()
-        .describe(
-          "IP address of the oscilloscope (defaults to SIGLENT_IP env var)"
-        ),
+        .describe("IP address of the oscilloscope (defaults to SIGLENT_IP)"),
       port: z
         .number()
+        .int()
         .optional()
-        .describe("TCP port (defaults to 5025)"),
+        .describe("TCP port (defaults to SIGLENT_PORT or 5025)"),
     },
     { readOnlyHint: false, openWorldHint: true },
     async ({ host, port }) => {
-      const targetHost = host || process.env.SIGLENT_IP;
+      const targetHost = host || config.defaultHost;
+      const targetPort = port ?? config.defaultPort;
       if (!targetHost) {
         return {
           content: [
@@ -34,12 +38,12 @@ export function registerConnectionTools(server: McpServer): void {
       }
 
       try {
-        const idn = await connection.connect(targetHost, port);
+        const idn = await connection.connect(targetHost, targetPort);
         return {
           content: [
             {
               type: "text" as const,
-              text: `Connected to ${targetHost}:${port || 5025}\nDevice: ${idn}`,
+              text: `Connected to ${targetHost}:${targetPort}\nDevice: ${idn}`,
             },
           ],
         };

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { connection } from "../connection.js";
+import { signedTimeString, signedVoltageString, timeString } from "../security/formats.js";
 
 export function registerAcquisitionTools(server: McpServer): void {
   server.tool(
@@ -13,12 +14,9 @@ export function registerAcquisitionTools(server: McpServer): void {
         .describe(
           "Acquisition command: 'run' starts acquisition (ARM), 'stop' stops it, 'single' sets single trigger mode, 'auto' sets auto trigger mode"
         ),
-      timebase: z
-        .string()
-        .optional()
-        .describe(
-          "Time per division with unit (e.g. '1US', '500NS', '10MS', '1S'). Range: 1NS to 100S"
-        ),
+      timebase: timeString(
+        "Time per division with unit (e.g. '1US', '500NS', '10MS', '1S'). Range: 1NS to 100S"
+      ).optional(),
       trigger_mode: z
         .enum(["AUTO", "NORM", "SINGLE", "STOP"])
         .optional()
@@ -26,25 +24,22 @@ export function registerAcquisitionTools(server: McpServer): void {
       trigger_source: z
         .enum(["C1", "C2", "C3", "C4", "EX", "EX5"])
         .optional()
-        .describe("Trigger source channel"),
-      trigger_level: z
-        .string()
-        .optional()
         .describe(
-          "Trigger level voltage with unit (e.g. '1.5V', '500mV', '-200mV')"
+          "Trigger source. Setting it selects an edge trigger on that source (TRSE EDGE,SR,<source>), " +
+            "replacing any other trigger type such as pulse or serial."
         ),
+      trigger_level: signedVoltageString(
+        "Trigger level voltage with unit (e.g. '1.5V', '500mV', '-200mV')"
+      ).optional(),
       trigger_slope: z
         .enum(["POS", "NEG", "WINDOW"])
         .optional()
         .describe(
           "Trigger slope: POS=rising edge, NEG=falling edge, WINDOW=alternating"
         ),
-      trigger_delay: z
-        .string()
-        .optional()
-        .describe(
-          "Trigger delay / horizontal position with unit (e.g. '0S', '-4.8US', '100NS')"
-        ),
+      trigger_delay: signedTimeString(
+        "Trigger delay / horizontal position with unit (e.g. '0S', '-4.8US', '100NS')"
+      ).optional(),
     },
     { readOnlyHint: false },
     async ({

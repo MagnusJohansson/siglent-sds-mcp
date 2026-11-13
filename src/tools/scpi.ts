@@ -1,84 +1,75 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { ServerConfig } from "../config.js";
 import { connection } from "../connection.js";
 
-export function registerScpiTools(server: McpServer): void {
+function errorResult(err: unknown) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Error: ${err instanceof Error ? err.message : String(err)}`,
+      },
+    ],
+    isError: true,
+  };
+}
+
+export function registerScpiTools(server: McpServer, config: ServerConfig): void {
   server.tool(
     "scpi_query",
-    "Send an arbitrary SCPI query to the oscilloscope and return the response. Use this as an escape hatch for commands not covered by other tools. Note: CHDR is set to OFF, so responses contain only values (no headers).",
+    "Send a SCPI query to the oscilloscope and return the response. Use this as an escape hatch for " +
+      "queries not covered by other tools. Only queries are accepted: a single header ending in '?' " +
+      "(e.g. '*IDN?', 'C1:VDIV?', 'SARA?'); parameters after '?' only for PAVA? (e.g. 'C1:PAVA? FREQ'). " +
+      "Note: CHDR is set to OFF, so responses contain only values (no headers).",
     {
       command: z
         .string()
-        .describe(
-          "SCPI query command to send (e.g. '*IDN?', 'C1:VDIV?', 'SARA?')"
-        ),
+        .max(512)
+        .describe("SCPI query to send (e.g. '*IDN?', 'C1:VDIV?', 'SARA?')"),
       timeout_ms: z
         .number()
+        .int()
+        .min(500)
+        .max(60_000)
         .optional()
-        .describe("Timeout in milliseconds (default 2000)"),
+        .describe("Timeout in milliseconds (default 5000)"),
     },
-    // Not read-only: nothing stops a setter being sent through this tool
-    { readOnlyHint: false },
+    // Read-only is now enforced: the connection rejects anything that isn't
+    // structurally a query (see src/security/scpi-guard.ts).
+    { readOnlyHint: true },
     async ({ command, timeout_ms }) => {
       try {
-        const response = await connection.query(
-          command,
-          timeout_ms || undefined
-        );
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: response,
-            },
-          ],
-        };
+        const response = await connection.query(command, timeout_ms);
+        return { content: [{ type: "text" as const, text: response }] };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
+        return errorResult(err);
       }
     }
   );
 
+  // Raw command access is opt-in. With it, the model can change any setting,
+  // including ones no other tool exposes (e.g. *RST or recalling a setup),
+  // so it is only registered when explicitly enabled.
+  if (!config.rawScpiEnabled) return;
+
   server.tool(
     "scpi_command",
-    "Send an arbitrary SCPI command to the oscilloscope (no response expected). Use this as an escape hatch for commands not covered by other tools.",
+    "Send a raw SCPI command to the oscilloscope (no response expected). Escape hatch for commands not " +
+      "covered by other tools. One command per call; newlines and ';' are rejected. Queries must use scpi_query.",
     {
       command: z
         .string()
-        .describe(
-          "SCPI command to send (e.g. '*RST', 'ARM', 'C1:VDIV 500mV')"
-        ),
+        .max(512)
+        .describe("SCPI command to send (e.g. 'ARM', 'C1:VDIV 500mV')"),
     },
-    { readOnlyHint: false },
+    { readOnlyHint: false, destructiveHint: true },
     async ({ command }) => {
       try {
         await connection.sendCommand(command);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Command sent: ${command}`,
-            },
-          ],
-        };
+        return { content: [{ type: "text" as const, text: `Command sent: ${command}` }] };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
+        return errorResult(err);
       }
     }
   );

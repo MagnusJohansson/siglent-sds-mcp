@@ -90,6 +90,7 @@ const bmpData = vi.hoisted(() => {
 });
 
 const mockConnection = vi.hoisted(() => ({
+  configure: vi.fn(),
   isConnected: vi.fn(() => true),
   getConnectionInfo: vi.fn(() => "192.168.1.126:5025"),
   connect: vi.fn(async () => "Siglent,SDS1104X-E,SDS1ECAX12345,8.2.6.1.37R1"),

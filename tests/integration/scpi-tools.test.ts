@@ -3,6 +3,7 @@ import { createTestServer, callTool, getText } from "../helpers.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 const mockConnection = vi.hoisted(() => ({
+  configure: vi.fn(),
   isConnected: vi.fn(() => true),
   getConnectionInfo: vi.fn(() => "192.168.1.126:5025"),
   connect: vi.fn(async () => "Siglent,SDS1104X-E,SDS1ECAX12345,8.2.6.1.37R1"),
@@ -25,7 +26,8 @@ let client: Client;
 let cleanup: () => Promise<void>;
 
 beforeAll(async () => {
-  const ctx = await createTestServer();
+  // scpi_command is opt-in and requires a named host
+  const ctx = await createTestServer({ SIGLENT_IP: "192.168.1.126", SIGLENT_ALLOW_RAW_SCPI: "true" });
   client = ctx.client;
   cleanup = ctx.cleanup;
 });
