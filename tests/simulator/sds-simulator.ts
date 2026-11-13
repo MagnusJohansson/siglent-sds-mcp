@@ -103,6 +103,9 @@ export class SdsSimulator {
     const upper = line.toUpperCase();
     if (upper === "*IDN?") return this.reply(sock, SIM_IDN);
     if (upper === "*OPC?") return this.reply(sock, "1", this.opcDelayMs);
+    // Test-only: a command without '?' that still produces output, like an
+    // undocumented firmware command. Only the acknowledgement check catches it.
+    if (upper.startsWith("ECHO ")) return this.reply(sock, line.slice(5));
     if (upper === "*RST") {
       this.state = { ...DEFAULT_STATE };
       return;

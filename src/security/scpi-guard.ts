@@ -150,3 +150,26 @@ export function assertBinaryQuery(cmd: string): void {
     throw new ScpiPolicyError(`"${cmd}" is not an allowed binary query.`);
   }
 }
+
+/**
+ * Commands sent through sendCommand() must not produce output: each is
+ * followed by *OPC? and its "1" is the only reply expected. A query (even one
+ * that answers "1", like "*OPC?" itself) or a data transfer such as SCDP would
+ * put an extra reply on the wire that the next query would read. So they are
+ * rejected before anything is written; the acknowledgement check in the
+ * connection is the backstop for undocumented ones.
+ */
+const OUTPUT_COMMANDS = new Set(["SCDP", "SCREEN_DUMP"]);
+
+export function assertIsCommand(cmd: string): void {
+  assertWireSafe(cmd);
+  if (cmd.includes("?")) {
+    throw new ScpiPolicyError(
+      `"${cmd}" is a query. Commands must not produce a reply; use scpi_query for queries.`
+    );
+  }
+  const header = cmd.trim().split(/\s/, 1)[0].replace(/^:/, "").toUpperCase();
+  if (OUTPUT_COMMANDS.has(header.split(":").pop()!)) {
+    throw new ScpiPolicyError(`"${header}" returns data and can't be sent as a command.`);
+  }
+}

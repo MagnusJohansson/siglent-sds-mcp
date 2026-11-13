@@ -19,7 +19,7 @@ Security release. Tool arguments come from a language model and are now treated 
 - Command injection: newlines, other control characters and `;` are rejected in every command and query before it reaches the socket.
 - `scpi_query` was annotated read-only but could change instrument state.
 - `connect` could open TCP connections to arbitrary hosts and ports.
-- After a timeout, a late reply could be read as the answer to the next query. The connection is now reset after any timeout, and when a command's `*OPC?` acknowledgement isn't `1`.
+- After a timeout, a late reply could be read as the answer to the next query. The connection is now reset after any timeout, and when a command's `*OPC?` acknowledgement isn't `1`, before anything queued behind it is sent. Commands containing `?` (and `SCDP`) are rejected before they are written.
 
 ### Fixed
 

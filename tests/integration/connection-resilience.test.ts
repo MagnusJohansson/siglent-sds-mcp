@@ -45,6 +45,37 @@ describe("after a command times out", () => {
   });
 });
 
+describe("a command that produces output", () => {
+  it("resets before the next queued command reaches the scope", async () => {
+    // The acknowledgement is checked in the reply handler, before the next
+    // queued operation starts. Otherwise the setter queued behind would be
+    // written, take effect, and still be reported as failed.
+    conn = new SiglentConnection(options());
+    await conn.connect("127.0.0.1", port);
+    sim.clear();
+
+    const [echo, setter] = await Promise.allSettled([
+      conn.sendCommand("ECHO hello"),
+      conn.sendCommand("C1:VDIV 5V"),
+    ]);
+    expect(echo.status === "rejected" && String(echo.reason)).toMatch(/Unexpected reply/);
+    expect(setter.status).toBe("rejected");
+    expect(sim.commands()).not.toContain("C1:VDIV 5V");
+    expect(sim.get("C1:VDIV")).toBe("1.00E+00");
+
+    // And the next query gets its own answer, not the late "1".
+    expect(await conn.query("C1:VDIV?")).toBe("1.00E+00");
+  });
+
+  it("rejects a query sent as a command before anything is written", async () => {
+    conn = new SiglentConnection(options());
+    await conn.connect("127.0.0.1", port);
+    sim.clear();
+    await expect(conn.sendCommand("*OPC?")).rejects.toThrow(/is a query/);
+    expect(sim.commands()).toEqual([]);
+  });
+});
+
 describe("overlapping connect calls", () => {
   it("lets the newer connect win without the older one tearing it down", async () => {
     // Like the startup auto-connect still initializing when the `connect` tool
