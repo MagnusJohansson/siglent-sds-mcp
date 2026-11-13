@@ -173,9 +173,11 @@ async function runChecks(s) {
   const { tools } = await s.client.listTools();
   check("scpi_command not exposed by default", !tools.some((t) => t.name === "scpi_command"), `${tools.length} tools`);
 
-  r = await s.call("connect", { host: "192.168.1.1" });
+  // Any private-LAN address other than the scope's, which is allowed.
+  const probeHost = ip === "192.168.1.1" ? "192.168.1.2" : "192.168.1.1";
+  r = await s.call("connect", { host: probeHost });
   const idn = await q(s.call, "*IDN?");
-  check("F3 connect to another LAN host rejected, session intact", !r.ok && /SDS/.test(idn), r.text);
+  check(`F3 connect to another LAN host (${probeHost}) rejected, session intact`, !r.ok && /SDS/.test(idn), r.text);
 
   await s.close();
   await new Promise((res) => setTimeout(res, 500)); // let the scope release the socket

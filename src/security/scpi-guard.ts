@@ -128,7 +128,9 @@ export function assertIsQuery(cmd: string): void {
         `${[...COMMON_QUERIES].map((q) => `*${q}?`).join(", ")} are permitted.`
     );
   }
-  if (ACTION_HEADERS.has(name.split(":").pop()!)) {
+  // The whole header, not its last segment: TRUART:STOP? is a documented
+  // query (UART stop bits), not the STOP action.
+  if (ACTION_HEADERS.has(name)) {
     throw new ScpiPolicyError(`"${name}" is an action command, not a query.`);
   }
   if (READ_AND_CLEAR_QUERIES.has(name)) {
@@ -183,7 +185,7 @@ export function assertIsCommand(cmd: string): void {
     );
   }
   const header = cmd.trim().split(/\s/, 1)[0].replace(/^:/, "").toUpperCase();
-  if (OUTPUT_COMMANDS.has(header.split(":").pop()!)) {
+  if (OUTPUT_COMMANDS.has(header)) {
     throw new ScpiPolicyError(`"${header}" returns data and can't be sent as a command.`);
   }
 }
