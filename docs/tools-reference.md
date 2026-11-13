@@ -165,7 +165,7 @@ For queries and commands not covered by the built-in tools.
 
 ### `scpi_query`
 
-Send a SCPI query and return the response. Only queries are accepted: a single header immediately followed by `?`. Parameters after `?` are only accepted for `PAVA?` (one measurement name or statistics slot, e.g. `C1:PAVA? FREQ`, `PAVA? STAT1`). Of the `*` commands, only `*IDN?`, `*OPC?`, `*ESR?`, `*STB?`, `*ESE?`, `*SRE?` and `*OPT?` are accepted.
+Send a SCPI query and return the response. Only queries are accepted: a single header immediately followed by `?`. Parameters after `?` are only accepted for `PAVA?` (one measurement name or statistics slot, e.g. `C1:PAVA? FREQ`, `PAVA? STAT1`). Of the `*` commands, only `*IDN?`, `*OPC?`, `*STB?`, `*ESE?`, `*SRE?` and `*OPT?` are accepted. Queries that clear a register as they read it (`INR?`, `*ESR?`, `CMR?`, `EXR?`, `DDR?`) are rejected, because the tool is marked read-only.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|

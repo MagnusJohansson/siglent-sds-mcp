@@ -67,6 +67,22 @@ describe("a command that produces output", () => {
     expect(await conn.query("C1:VDIV?")).toBe("1.00E+00");
   });
 
+  it("doesn't write the delayed *OPC? into a reconnected session", async () => {
+    // The ECHO reply arrives before the 20 ms gap between a command and its
+    // *OPC?. The reset happens, and the next call reconnects at once: the
+    // old command's *OPC? must not end up on the new connection.
+    conn = new SiglentConnection(options());
+    await conn.connect("127.0.0.1", port);
+    sim.clear();
+
+    await expect(conn.sendCommand("ECHO early")).rejects.toThrow(/Unexpected reply/);
+    expect(await conn.query("*IDN?")).toBe(SIM_IDN);
+    await new Promise((r) => setTimeout(r, 50)); // past the 20 ms gap
+
+    const logs = sim.connectionLogs();
+    expect(logs[logs.length - 1]).toEqual(["CHDR OFF", "*OPC?", "*IDN?", "*IDN?"]);
+  });
+
   it("rejects a query sent as a command before anything is written", async () => {
     conn = new SiglentConnection(options());
     await conn.connect("127.0.0.1", port);

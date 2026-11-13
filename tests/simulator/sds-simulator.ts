@@ -31,6 +31,7 @@ export class SdsSimulator {
   private server: net.Server | null = null;
   private sockets = new Set<net.Socket>();
   private lines: string[] = [];
+  private perConnection: string[][] = [];
   private state: Record<string, string> = { ...DEFAULT_STATE };
   /** Delay before answering *OPC?, to simulate a slow command. */
   opcDelayMs = 0;
@@ -38,6 +39,8 @@ export class SdsSimulator {
   async start(): Promise<number> {
     this.server = net.createServer((sock) => {
       this.sockets.add(sock);
+      const log: string[] = [];
+      this.perConnection.push(log);
       sock.on("close", () => this.sockets.delete(sock));
       let buf = "";
       sock.on("data", (chunk) => {
@@ -46,7 +49,10 @@ export class SdsSimulator {
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i).trim();
           buf = buf.slice(i + 1);
-          if (line) this.handle(sock, line);
+          if (line) {
+            log.push(line);
+            this.handle(sock, line);
+          }
         }
       });
       sock.on("error", () => {});
@@ -67,6 +73,12 @@ export class SdsSimulator {
 
   clear(): void {
     this.lines = [];
+    this.perConnection = [];
+  }
+
+  /** Lines received on each connection opened since the last clear(), in order. */
+  connectionLogs(): string[][] {
+    return this.perConnection.map((l) => [...l]);
   }
 
   get(key: string): string | undefined {

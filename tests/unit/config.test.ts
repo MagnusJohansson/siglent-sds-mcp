@@ -37,6 +37,7 @@ describe("loadConfig", () => {
   it("parses the idle timeout in seconds", () => {
     expect(loadConfig({ SIGLENT_IDLE_TIMEOUT: "60" }).idleTimeoutMs).toBe(60_000);
     expect(loadConfig({ SIGLENT_IDLE_TIMEOUT: "0.5" }).idleTimeoutMs).toBe(500);
+    expect(loadConfig({ SIGLENT_IDLE_TIMEOUT: "2147483" }).idleTimeoutMs).toBe(2_147_483_000);
   });
 
   it.each([
@@ -44,6 +45,8 @@ describe("loadConfig", () => {
     ["SIGLENT_PORT", "70000"],
     ["SIGLENT_IDLE_TIMEOUT", "-1"],
     ["SIGLENT_IDLE_TIMEOUT", "soon"],
+    // Beyond setTimeout's range, Node would fire after 1 ms instead.
+    ["SIGLENT_IDLE_TIMEOUT", "2592000"],
   ])("fails on invalid %s=%s instead of ignoring it", (name, value) => {
     expect(() => loadConfig({ [name]: value })).toThrow();
   });

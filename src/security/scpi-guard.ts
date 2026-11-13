@@ -77,9 +77,18 @@ const QUERY_PARAMETER_RULES: Array<{ name: string; header: RegExp; params: RegEx
 /**
  * IEEE 488.2 common commands that are pure queries. Others that accept a '?'
  * form (*RST?, *CAL?, *TST?, *CLS?) are actions: *CAL? runs a self
- * calibration that takes minutes.
+ * calibration that takes minutes. *ESR? is left out because reading the
+ * event status register also clears it.
  */
-const COMMON_QUERIES = new Set(["IDN", "OPC", "ESR", "STB", "ESE", "SRE", "OPT"]);
+const COMMON_QUERIES = new Set(["IDN", "OPC", "STB", "ESE", "SRE", "OPT"]);
+
+/**
+ * Queries that read a status register and clear it as a side effect, so a
+ * tool that promises to be read-only must not send them. INR? is documented
+ * as read-and-clear in the SDS programming guide; CMR?, EXR? and DDR? are the
+ * equivalent error registers on earlier Siglent/LeCroy firmware.
+ */
+const READ_AND_CLEAR_QUERIES = new Set(["INR", "CMR", "EXR", "DDR"]);
 
 /**
  * Siglent action commands with no documented query form. The shape check
@@ -121,6 +130,11 @@ export function assertIsQuery(cmd: string): void {
   }
   if (ACTION_HEADERS.has(name.split(":").pop()!)) {
     throw new ScpiPolicyError(`"${name}" is an action command, not a query.`);
+  }
+  if (READ_AND_CLEAR_QUERIES.has(name)) {
+    throw new ScpiPolicyError(
+      `"${name}?" is not allowed: reading this status register also clears it.`
+    );
   }
   if (params !== undefined && params.trim() !== "") {
     const rule = QUERY_PARAMETER_RULES.find((r) => r.header.test(header));
