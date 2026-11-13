@@ -118,7 +118,7 @@ Replace `/path/to/siglent-sds-mcp` with the actual path to your clone.
 | `SIGLENT_PORT` | No | `5025` | TCP port (only change if your setup differs) |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts `connect` may reach besides `SIGLENT_IP`. If neither is set, only private-LAN IP addresses are accepted. |
 | `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Registers the raw `scpi_command` tool. Requires `SIGLENT_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts. |
-| `SIGLENT_IDLE_TIMEOUT` | No | `0` (never) | Seconds of inactivity after which the scope connection is released. The next tool call reconnects automatically. |
+| `SIGLENT_IDLE_TIMEOUT` | No | `0` (never) | Seconds of inactivity after which the scope connection is released (at most about 24 days). The next tool call reconnects automatically. |
 
 Invalid values (e.g. a non-numeric port) stop the server at startup instead of being ignored.
 
@@ -339,7 +339,7 @@ ChatGPT Desktop only supports remote HTTPS MCP servers (called "connectors"), no
 Tool arguments come from a language model, which may have been steered by content it read (a datasheet, a web page, a previous tool result). The server therefore treats every argument as untrusted and enforces its checks in the connection layer, the single point every command passes through before it reaches the scope. See [docs/threat-model.md](docs/threat-model.md) for the full analysis.
 
 - **One command per write.** Newlines, other control characters and `;` are rejected in every command and query, so a parameter can't smuggle in a second command.
-- **`scpi_query` only sends queries:** a single header immediately followed by `?`. Parameters after `?` are only accepted for `PAVA?` (e.g. `C1:PAVA? FREQ`). `*` commands only as pure queries (`*IDN?`, `*OPC?`, ...), and known action commands (`ASET?`, `ARM`, ...) are refused.
+- **`scpi_query` only sends queries:** a single header immediately followed by `?`. Parameters after `?` are only accepted for `PAVA?` (e.g. `C1:PAVA? FREQ`). `*` commands only as pure queries (`*IDN?`, `*OPC?`, ...); known action commands (`ASET?`, `ARM`, ...) and queries that clear a status register as they read it (`INR?`, `*ESR?`) are refused.
 - **Strict formats** for every free-text parameter: voltages (`500mV`), times (`1US`).
 - **`connect` is restricted** to `SIGLENT_IP`, `SIGLENT_ALLOWED_HOSTS`, or, if neither is set, private-LAN IP addresses, on the instrument port. Loopback, link-local (cloud metadata) and host names are refused. The same check applies to automatic reconnects.
 - **Raw `scpi_command` is off by default.** Set `SIGLENT_ALLOW_RAW_SCPI=true` to enable it; it also requires named hosts (`*` is not accepted).

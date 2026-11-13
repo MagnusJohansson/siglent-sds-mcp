@@ -361,8 +361,12 @@ export class SiglentConnection {
       this.close("Connection reset after a timeout");
     }, timeout);
 
+    // Both writes go to this socket only. If the connection is reset and a
+    // new one opened during the gap below, the delayed *OPC? must not land
+    // in the new session.
+    const socket = this.socket;
     const writeLine = (line: string, next?: () => void): void => {
-      this.socket!.write(line + "\n", (err) => {
+      socket.write(line + "\n", (err) => {
         if (err) {
           this.clearPending();
           this.queryRunning = false;
@@ -375,7 +379,11 @@ export class SiglentConnection {
     };
 
     if (pre !== undefined) {
-      writeLine(pre, () => setTimeout(() => this.socket && writeLine(cmd), OPC_GAP_MS));
+      writeLine(pre, () =>
+        setTimeout(() => {
+          if (this.socket === socket && !socket.destroyed) writeLine(cmd);
+        }, OPC_GAP_MS)
+      );
     } else {
       writeLine(cmd);
     }

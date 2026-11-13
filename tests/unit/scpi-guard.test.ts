@@ -33,6 +33,7 @@ describe("assertIsQuery", () => {
     "SARA?",
     "*IDN?",
     "*OPC?",
+    "*STB?",
     "C1:PAVA? FREQ",
     "PAVA? STAT3",
     "C2:PARAMETER_VALUE? PKPK",
@@ -54,6 +55,11 @@ describe("assertIsQuery", () => {
     ["screen dump as text", "SCDP?"],
     ["compound", "C1:VDIV?;ARM"],
     ["space before ?", "C1:VDIV ?"],
+    ["INR? (reads and clears)", "INR?"],
+    ["*ESR? (reads and clears)", "*ESR?"],
+    ["CMR? (reads and clears)", "CMR?"],
+    ["EXR? (reads and clears)", "EXR?"],
+    ["DDR? (reads and clears)", "DDR?"],
   ])("rejects %s", (_label, cmd) => {
     expect(() => assertIsQuery(cmd)).toThrow(ScpiPolicyError);
   });

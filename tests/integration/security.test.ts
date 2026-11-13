@@ -96,6 +96,7 @@ describe("default configuration", () => {
       ["an auto setup in query form", "ASET?"],
       ["an action command without '?'", "ARM"],
       ["a measurement query with a second parameter", "C1:PAVA? FREQ,5V"],
+      ["a query that clears a status register", "INR?"],
     ])("rejects %s", async (_label, command) => {
       await expectRejected(ctx.client, "scpi_query", { command });
       expect(await wire(ctx.client)).toEqual([]);

@@ -24,13 +24,22 @@ function parsePort(name: string, value: string | undefined): number | undefined 
   return n;
 }
 
+/** Longest delay setTimeout supports; Node treats anything larger as 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 function parseSeconds(name: string, value: string | undefined): number {
   if (value === undefined || value.trim() === "") return 0;
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) {
     throw new Error(`${name} must be a number of seconds (0 = never), got "${value}".`);
   }
-  return n * 1000;
+  const ms = Math.round(n * 1000);
+  if (ms > MAX_TIMER_MS) {
+    throw new Error(
+      `${name} must be at most ${Math.floor(MAX_TIMER_MS / 1000)} seconds (about 24 days), got "${value}".`
+    );
+  }
+  return ms;
 }
 
 function isTrue(value: string | undefined): boolean {

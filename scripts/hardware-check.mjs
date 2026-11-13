@@ -68,9 +68,20 @@ async function startServer(extraEnv = {}) {
 
 const SETTINGS = ["C1:VDIV?", "TDIV?", "TRSE?", "TRMD?", "WFSU?"];
 
+/**
+ * Read the settings this script changes. Throws if any read fails or comes
+ * back empty: an error text must never be stored (and later "restored") as
+ * an original value.
+ */
 async function snapshot(call) {
   const out = {};
-  for (const query of SETTINGS) out[query] = (await call("scpi_query", { command: query })).text;
+  for (const query of SETTINGS) {
+    const r = await call("scpi_query", { command: query });
+    if (!r.ok || r.text.trim() === "") {
+      throw new Error(`could not read ${query}: ${r.text || "empty reply"}`);
+    }
+    out[query] = r.text.trim();
+  }
   return out;
 }
 
@@ -86,7 +97,16 @@ async function main() {
     await s.close();
     process.exit(1);
   }
-  const original = await snapshot(s.call);
+  let original;
+  try {
+    original = await snapshot(s.call);
+  } catch (err) {
+    // Nothing has been changed yet: stop before the checks change anything.
+    check("read original settings", false, err.message);
+    await s.close();
+    console.log("\nAborted before changing any settings.");
+    process.exit(1);
+  }
   console.log(`  info  original: ${JSON.stringify(original)}`);
 
   try {
@@ -192,7 +212,13 @@ async function restore(original) {
     for (const [query, value] of Object.entries(original)) {
       await r.call("scpi_command", { command: `${query.replace("?", "")} ${value}` });
     }
-    const restored = await snapshot(r.call);
+    let restored;
+    try {
+      restored = await snapshot(r.call);
+    } catch (err) {
+      check("settings restored", false, `verification read failed: ${err.message}`);
+      return;
+    }
     check("settings restored", JSON.stringify(restored) === JSON.stringify(original), JSON.stringify(restored));
   } finally {
     await r.close();
