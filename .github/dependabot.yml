@@ -1,0 +1,46 @@
+# Dependency updates. The cooldown waits a few days before proposing a newly
+# published version: hijacked releases are usually caught and pulled quickly.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    # Major versions held back on purpose. Ignore rules also apply to security
+    # updates, so a fix released only in a new major won't be proposed for
+    # these packages: Dependabot alerts still report it.
+    ignore:
+      # vitest 5 requires Node >= 22; CI still tests Node 20 (engines ">=20.9").
+      # Revisit when Node 20 support is dropped.
+      - dependency-name: vitest
+        update-types: [version-update:semver-major]
+      # Keeps @types/node from drifting further ahead of the oldest supported
+      # runtime. It is on 22 while engines is ">=20.9", so it doesn't catch
+      # Node 22-only APIs; aligning it with Node 20 is a separate change.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+      # TypeScript 7 (native compiler) fails the build; migrate separately.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

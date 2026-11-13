@@ -13,6 +13,7 @@ Security release. Tool arguments come from a language model and are now treated 
 - **`get_acquisition_status`** reports the active trigger source's level and slope as `trigger_level` and `trigger_slope`, plus a new `trigger_source` field (previously always C1's, as `trigger_level_c1` and `trigger_slope_c1`).
 - **Setting `trigger_source`** selects an edge trigger on that source (`TRSE EDGE,SR,<source>`), replacing other trigger types.
 - Invalid values for numeric environment variables now stop the server at startup instead of being ignored.
+- **Node.js 20.9 or later** is required (was 20), because of sharp 0.35. The Docker image runs on Node 26.
 
 ### Security fixes
 
@@ -36,6 +37,15 @@ Also fixed:
 
 - Overlapping connects (auto-connect still initializing when `connect` is called) could leave two sockets open.
 - A short idle timeout could close the connection during the connect handshake.
+
+### Dependencies
+
+- `@modelcontextprotocol/sdk` 1.27 → 1.32.2, `zod` 3.25 → 4.6.7, `sharp` 0.34 → 0.35.5, `vitest` 3 → 4.1.12 (development). `@types/sharp` removed (sharp ships its own types). `npm audit`: 0 vulnerabilities (1.0.1's lock file had advisories in the MCP SDK, zod and the SDK's HTTP stack, which stdio mode doesn't load).
+
+### Release process
+
+- Publishing to npm and GHCR is triggered by publishing a GitHub Release, not by pushing a tag. The npm workflow checks that the release tag matches `package.json` and that `repository.url` matches the repository, runs the tests, and publishes with provenance on Node 26. Pre-releases go to the npm `next` dist-tag.
+- All GitHub Actions are pinned to commit SHAs and the Docker base image to a digest. Dependabot (with a 7-day cooldown), CodeQL and OpenSSF Scorecard workflows added.
 
 ### Added
 
