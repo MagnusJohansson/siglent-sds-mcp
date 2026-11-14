@@ -1,6 +1,6 @@
 {
   "name": "siglent-sds-mcp",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "MCP server for Siglent SDS oscilloscope control via SCPI over TCP sockets",
   "type": "module",
   "main": "build/index.js",
@@ -20,7 +20,8 @@
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "hardware-check": "npm run build && node scripts/hardware-check.mjs"
+    "hardware-check": "npm run build && node scripts/hardware-check.mjs",
+    "e2e-loopback": "npm run build && node scripts/e2e-loopback.mjs"
   },
   "keywords": [
     "mcp",

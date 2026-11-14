@@ -405,6 +405,7 @@ npm run dev         # Build and run
 npm run inspector   # Launch with MCP Inspector for debugging
 npm test            # Unit, integration and end-to-end security tests (SCPI simulator)
 npm run hardware-check -- <scope-ip>   # Security checks against a real scope; restores the settings it changes
+npm run e2e-loopback -- <generator-ip> <scope-ip>   # Siglent SDG CH1 -> coax -> scope CH1: generate with siglent-sdg-mcp, measure with this server
 ```
 
 ### Releasing

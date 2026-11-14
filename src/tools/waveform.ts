@@ -68,14 +68,14 @@ export function registerWaveformTools(server: McpServer): void {
         // Request waveform data (binary block response)
         const rawData = await connection.queryBinary(`${channel}:WF? DAT2`);
 
-        // Convert raw bytes to voltage values
+        // Convert raw bytes to voltage values. Each byte is a signed 8-bit
+        // code: 0xFF is -1 and 0x80 is -128. The programming guide says to
+        // subtract 255 from values above 127, which maps 0xFF to 0 and reads
+        // every negative sample one code (vdiv/25) too high.
+        const codes = new Int8Array(rawData.buffer, rawData.byteOffset, rawData.length);
         const voltages: number[] = [];
-        for (let i = 0; i < rawData.length; i++) {
-          let codeValue = rawData[i];
-          if (codeValue > 127) {
-            codeValue = codeValue - 255;
-          }
-          voltages.push(codeValue * (vdiv / 25) - ofst);
+        for (const code of codes) {
+          voltages.push(code * (vdiv / 25) - ofst);
         }
 
         // Generate time values
@@ -112,10 +112,12 @@ export function registerWaveformTools(server: McpServer): void {
             start: data[0]?.time ?? 0,
             end: data[data.length - 1]?.time ?? 0,
           },
-          voltage_range: {
-            min: Math.min(...data.map((d) => d.voltage)),
-            max: Math.max(...data.map((d) => d.voltage)),
-          },
+          // A loop, not Math.min(...): spreading a few hundred thousand
+          // points as arguments overflows the call stack.
+          voltage_range: data.reduce(
+            (r, d) => ({ min: Math.min(r.min, d.voltage), max: Math.max(r.max, d.voltage) }),
+            { min: Infinity, max: -Infinity }
+          ),
           data,
         };
 
