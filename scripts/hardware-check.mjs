@@ -6,7 +6,10 @@
  * Usage:  npm run hardware-check -- <scope-ip>
  *
  * - Injection probes try to change the timebase (TDIV) and the check reads it
- *   back: the payload is harmless and easy to verify.
+ *   back: the payload is harmless and easy to verify. The SET50? probe reads
+ *   the trigger level back instead, after setting it to 300 mV: run with no
+ *   signal on the trigger channel, or one not centred near 300 mV, or a SET50
+ *   that ran would leave the level where it was and the probe would pass.
  * - Changes C1 volts/div, the timebase, trigger settings and the waveform
  *   transfer setup (WFSU) while it runs, and restores the values it read at
  *   the start, also if a check fails or throws.
@@ -66,7 +69,20 @@ async function startServer(extraEnv = {}) {
   return { client, call, conn, close };
 }
 
-const SETTINGS = ["C1:VDIV?", "TDIV?", "TRSE?", "TRMD?", "WFSU?"];
+/** The edge trigger's source channel ("C1"), or null for EX, LINE, ... */
+function triggerChannel(trse) {
+  return /(?:^|,)SR,(C\d)(?:,|$)/.exec(trse)?.[1] ?? null;
+}
+
+/**
+ * The settings this script changes. The trigger level is per channel, and
+ * setting <ch>:TRLV also switches the trigger source to <ch> on SDS1000X-E,
+ * so it's read for the current source and restored before TRSE.
+ */
+function settingsFor(trse) {
+  const ch = triggerChannel(trse);
+  return ["C1:VDIV?", "TDIV?", ...(ch ? [`${ch}:TRLV?`] : []), "TRSE?", "TRMD?", "WFSU?"];
+}
 
 /**
  * Read the settings this script changes. Throws if any read fails or comes
@@ -74,8 +90,12 @@ const SETTINGS = ["C1:VDIV?", "TDIV?", "TRSE?", "TRMD?", "WFSU?"];
  * an original value.
  */
 async function snapshot(call) {
+  const trse = await call("scpi_query", { command: "TRSE?" });
+  if (!trse.ok || trse.text.trim() === "") {
+    throw new Error(`could not read TRSE?: ${trse.text || "empty reply"}`);
+  }
   const out = {};
-  for (const query of SETTINGS) {
+  for (const query of settingsFor(trse.text.trim())) {
     const r = await call("scpi_query", { command: query });
     if (!r.ok || r.text.trim() === "") {
       throw new Error(`could not read ${query}: ${r.text || "empty reply"}`);
@@ -168,6 +188,30 @@ async function runChecks(s) {
     const res = await s.call(tool, args);
     const st = await unchanged(s.call);
     check(label, !res.ok && st.same, `rejected=${!res.ok}, TDIV=${st.now}`);
+  }
+
+  // SET50 moves the trigger level to the middle of the signal, not the
+  // timebase. Set a level away from the middle first (there's no signal, or
+  // one centred near 0 V), so a SET50 that ran would show in the readback.
+  const trigCh = triggerChannel(await q(s.call, "TRSE?"));
+  const set50Label = "F1 trigger-level action in query form (SET50?)";
+  if (!trigCh) {
+    check(set50Label, false, "trigger source isn't a channel; set an edge trigger on C1-C4");
+  } else {
+    r = await s.call("configure_acquisition", { trigger_level: "300mV" });
+    const levelBefore = await q(s.call, `${trigCh}:TRLV?`);
+    if (!r.ok || Math.abs(parseFloat(levelBefore) - 0.3) > 0.05) {
+      check(set50Label, false, `could not set the trigger level to 300 mV first: ${r.ok ? levelBefore : r.text}`);
+    } else {
+      const res = await s.call("scpi_query", { command: "SET50?" });
+      const levelAfter = await q(s.call, `${trigCh}:TRLV?`);
+      const st = await unchanged(s.call);
+      check(
+        set50Label,
+        !res.ok && levelAfter === levelBefore && st.same,
+        `rejected=${!res.ok}, ${trigCh}:TRLV ${levelBefore} -> ${levelAfter}, TDIV=${st.now}`
+      );
+    }
   }
 
   const { tools } = await s.client.listTools();

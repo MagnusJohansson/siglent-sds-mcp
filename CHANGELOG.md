@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.2
+
+### Fixed
+
+- `scpi_query` no longer accepts commands that the programming guide documents without a query form. Only a short list of known actions (`ASET`, `ARM`, `STOP`, `FRTR`, `PACL`) was refused; others passed with a `?` appended, for example `SET50?` (set the trigger level to 50 %), `MEACL?` (clear measurements), `REFSA?` / `REFCL?` (save or close a reference waveform), `PFCM?` (create a pass/fail mask), `RCPN?` / `STPN?` (recall or store a setup) and the decode and gate setters. Whether the firmware ignores the `?` or runs the command isn't documented. All of them are now refused, in long and short form, with one or more source prefixes such as `C1:` or a numeric suffix. Unit tests read the guide and check both directions: every command it documents without a query form is refused, and every query header it documents without parameters is still accepted.
+- The read-and-clear queries (`INR?`, ...) are also refused with a source prefix or a numeric suffix.
+- `scpi_query` rejects headers with an empty node (`C1::VDIV?`, `C1:VDIV:?`).
+
 ## 2.0.1
 
 ### Fixed

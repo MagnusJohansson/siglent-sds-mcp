@@ -8,7 +8,7 @@ import { registerMeasureTools } from "./tools/measure.js";
 import { registerWaveformTools } from "./tools/waveform.js";
 import { registerScpiTools } from "./tools/scpi.js";
 
-export const SERVER_VERSION = "2.0.1";
+export const SERVER_VERSION = "2.0.2";
 
 /** Build the MCP server with all tools registered under the given configuration. */
 export function createServer(config: ServerConfig): McpServer {
