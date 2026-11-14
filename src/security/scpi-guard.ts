@@ -88,14 +88,15 @@ const COMMON_QUERIES = new Set(["IDN", "OPC", "STB", "ESE", "SRE", "OPT"]);
  * and a short form ("AUTO_SETUP", "ASET"), not SCPI mnemonics with a variable
  * short form. Blocking more spellings than the guide documents is the safe
  * direction, so a pattern also matches:
- * - a source prefix of letters and a number (C1:, B1:, M1:, F1:), which many
- *   SDS headers take. A prefix without a number is a different command:
- *   TRUART:STOP? is a documented query (UART stop bits), not the STOP action.
+ * - source prefixes of letters and a number (C1:, B1:, M1:, F1:), which many
+ *   SDS headers take; any number of them, of any length (C1:B1:, DIGITAL1:).
+ *   A prefix without a number is a different command: TRUART:STOP? is a
+ *   documented query (UART stop bits), not the STOP action.
  * - a numeric suffix on any node (ASET1), which SCPI parsers commonly accept.
  */
 function headerPattern(spec: string): RegExp {
   const nodes = spec.split(":").map((node) => `(?:${node})\\d*`);
-  return new RegExp(`^(?:[A-Z]{1,4}\\d+:)?${nodes.join(":")}$`, "i");
+  return new RegExp(`^(?:[A-Z]+\\d+:)*${nodes.join(":")}$`, "i");
 }
 
 /**
@@ -116,8 +117,9 @@ const READ_AND_CLEAR_QUERIES = ["INR", "CMR", "EXR", "DDR"].map((spec) => ({
  * firmware ignores the '?' or runs the command isn't documented, so a tool
  * marked read-only must not send them. *RST, *RCL and *SAV are covered by
  * COMMON_QUERIES. Undocumented headers remain a residual risk (see
- * docs/threat-model.md); a unit test checks that every query the guide
- * documents still passes.
+ * docs/threat-model.md); unit tests check against the guide that every
+ * command-only header is refused and every documented query header (without
+ * parameters) still passes.
  */
 const ACTION_HEADERS = [
   "ARM_ACQUISITION|ARM",

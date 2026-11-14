@@ -65,6 +65,7 @@ describe("assertIsQuery", () => {
     ["DDR? (reads and clears)", "DDR?"],
     ["a read-and-clear query with a channel prefix", "C1:INR?"],
     ["a read-and-clear query with a numeric suffix", "INR1?"],
+    ["a read-and-clear query with two prefixes", "C1:B1:INR?"],
     ["an empty header node", "C1::VDIV?"],
     ["an empty last node", "C1:VDIV:?"],
   ])("rejects %s", (_label, cmd) => {
@@ -98,10 +99,17 @@ describe("assertIsQuery: commands the guide documents without a query form", () 
     "CRAU?",
     "STOP?",
     "FRTR?",
+    // Not in the guide; blocked anyway.
+    "FORCE_TRIGGER?",
     // Spellings outside the guide's: a numeric suffix, a source prefix, lower case.
     "ASET1?",
     "C1:ASET?",
     "arm?",
+    // More than one prefix, or a longer one.
+    "C1:B1:ASET?",
+    "DIGITAL1:ASET?",
+    "C1:C2:STOP?",
+    "ABCDE1:STOP?",
   ])("rejects %s", (cmd) => {
     expect(() => assertIsQuery(cmd)).toThrow(/action command/);
   });
@@ -180,6 +188,57 @@ describe("assertIsQuery: commands the guide documents without a query form", () 
     });
     expect(unexpected).toEqual([]);
     expect([...blockedOnPurpose].filter((q) => !documented.has(q))).toEqual([]);
+  });
+
+  it("rejects every command the programming guide documents without a query form", () => {
+    const guide = readFileSync(new URL("../../docs/programming-guide.md", import.meta.url), "utf8");
+    const lines = guide.split("\n");
+    // 1. The long and short name of every section marked "Command" only.
+    const fromSections = lines.flatMap((line, i) => {
+      const heading = /^#{1,6}\s+(.*)$/.exec(line);
+      if (!heading || /^\d+$/.test(heading[1].trim())) return [];
+      const marker = lines
+        .slice(i + 1, i + 6)
+        .map((l) => l.trim())
+        .find((l) => /^(Command|Query)(\s*\/\s*Query)?$/.test(l));
+      if (marker !== "Command") return [];
+      return heading[1].split("|").map((name) => name.trim().split(/\s+/).pop() ?? "");
+    });
+    // 2. The index at the end: "AUTO_SETUP, ASET, Command, 39", "B<n>:DCIC, Command, 62".
+    // Some commands have no marker line in their section (B<n>:DCIC) or only
+    // appear in the index (CURSOR_AUTO, RECALL).
+    const index = guide.slice(guide.lastIndexOf("\nIndex\n"));
+    const fromIndex = [...index.matchAll(/^(.+), Command, \d+$/gm)].flatMap((m) =>
+      m[1].split(",").map((name) => name.trim())
+    );
+    const commands = new Set(
+      [...fromSections, ...fromIndex]
+        .map((name) => name.replace(/<\s*n\s*>/gi, "1"))
+        // The index drops the '*' of the common commands.
+        .map((name) => (/^(OPC|RCL|RST|SAV)$/.test(name) ? `*${name}` : name))
+    );
+    expect(commands.size).toBeGreaterThan(40);
+
+    // The index says "Command", but the section documents a query form.
+    const indexErrors = ["FRAME_SET", "FRAM", "SKEW", "*OPC"];
+    expect(indexErrors.filter((name) => !commands.has(name))).toEqual([]);
+
+    const leaks = [...commands]
+      .filter((name) => !indexErrors.includes(name))
+      .flatMap((name) =>
+        name.startsWith("*")
+          ? [`${name}?`, `${name.toLowerCase()}?`]
+          : [`${name}?`, `${name.toLowerCase()}?`, `C1:${name}?`, `${name}1?`]
+      )
+      .filter((q) => {
+        try {
+          assertIsQuery(q);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    expect(leaks).toEqual([]);
   });
 });
 
