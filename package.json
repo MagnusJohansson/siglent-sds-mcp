@@ -20,7 +20,8 @@
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "hardware-check": "npm run build && node scripts/hardware-check.mjs"
+    "hardware-check": "npm run build && node scripts/hardware-check.mjs",
+    "e2e-loopback": "npm run build && node scripts/e2e-loopback.mjs"
   },
   "keywords": [
     "mcp",
