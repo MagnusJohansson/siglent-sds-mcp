@@ -5,10 +5,11 @@
 ### Fixed
 
 - `get_waveform` decoded negative samples one ADC code (`vdiv/25`) too high, and read `0xFF` as 0 instead of -1. The scope sends each sample as a signed byte; the code subtracted 255 from values above 127, as the programming guide says, instead of 256. The error was at most 4 % of a division per sample and shifted the mean of a signal centred on zero by about half a code. The end-to-end loopback check found it: the mean of the downloaded samples differed from the scope's own `MEAN` measurement by half a code at two different V/div settings. After the fix they agree within 1 mV.
+- `get_waveform` failed with "Maximum call stack size exceeded" when asked for a few hundred thousand points or more (`max_points` allows up to 1,000,000): the voltage range was computed by spreading every point into `Math.min`/`Math.max`.
 
 ### Added
 
-- `npm run e2e-loopback -- <generator-ip> <scope-ip>`: an end-to-end check against real hardware. A Siglent SDG generator's CH1 output is connected to the scope's CH1 with a coax cable. The check generates signals through siglent-sdg-mcp, measures them through this server, and compares the scope's measurements and the downloaded samples with what was generated. It restores both instruments' settings and always switches the generator output off.
+- `npm run e2e-loopback -- <generator-ip> <scope-ip>`: an end-to-end check against real hardware. A Siglent SDG generator's CH1 output is connected to the scope's CH1 with a coax cable. The check generates signals through siglent-sdg-mcp, measures them through this server, and compares the scope's measurements and the downloaded samples with what was generated. At the end, also after a failure or a first Ctrl-C, it switches the generator output off in a fresh session, reads it back and warns if it can't confirm it, and restores and verifies the settings it changed on both instruments. It refuses to start if a generator output is already on, or if C1 has modulation, sweep or burst on. The generator server is a pinned siglent-sdg-mcp release (`--sdg-version` or `--sdg-entry` to change it).
 
 ### Dependencies
 

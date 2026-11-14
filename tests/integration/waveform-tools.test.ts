@@ -183,6 +183,41 @@ describe("get_waveform", () => {
     expect(data.map((d) => +(d.voltage / 0.04).toFixed(6))).toEqual([0, 1, 127, -128, -2, -1]);
   });
 
+  it("applies the offset to negative codes too", async () => {
+    mockConnection.query.mockImplementation(async (cmd: string) => {
+      const responses: Record<string, string> = {
+        "C1:VDIV?": "1.00E+00",
+        "C1:OFST?": "5.00E-01",
+        "TDIV?": "1.00E-03",
+        "SARA?": "1.00E+06",
+        "TRDL?": "0.00E+00",
+      };
+      return responses[cmd] ?? "";
+    });
+    mockConnection.queryBinary.mockImplementation(async (cmd: string) => {
+      if (cmd.includes(":WF? DAT2")) return Buffer.from([0x00, 0x19, 0xff, 0x80]);
+      throw new Error(`Unexpected binary query: ${cmd}`);
+    });
+    const data = JSON.parse(getText(await callTool(client, "get_waveform", { channel: "C1" }))).data;
+    // voltage = code * 0.04 - 0.5, for codes 0, 25, -1, -128
+    expect(data.map((d: { voltage: number }) => d.voltage)).toEqual(
+      [-0.5, 0.5, -0.54, -5.62].map((v) => expect.closeTo(v, 9))
+    );
+  });
+
+  it("handles a record of several hundred thousand points", async () => {
+    mockConnection.queryBinary.mockImplementation(async (cmd: string) => {
+      if (cmd.includes(":WF? DAT2")) return Buffer.alloc(300_000, 0xff);
+      throw new Error(`Unexpected binary query: ${cmd}`);
+    });
+    const result = await callTool(client, "get_waveform", { channel: "C1", max_points: 300_000 });
+    expect(result.isError, getText(result).slice(0, 200)).toBeFalsy();
+    const parsed = JSON.parse(getText(result));
+    expect(parsed.returned_points).toBe(300_000);
+    expect(parsed.voltage_range.min).toBeCloseTo(-0.04, 9);
+    expect(parsed.voltage_range.max).toBeCloseTo(-0.04, 9);
+  });
+
   it("downsamples when max_points < total points", async () => {
     const result = await callTool(client, "get_waveform", {
       channel: "C1",

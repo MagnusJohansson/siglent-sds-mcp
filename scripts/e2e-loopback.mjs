@@ -10,16 +10,26 @@
  * Wiring: SDG CH1 output -> coax -> SDS CH1 input, no 50 ohm terminator. The
  * generator's load is set to Hi-Z to match the scope's 1 MOhm input.
  *
- * The generator server is the latest siglent-sdg-mcp from npm (run with npx),
- * or a local build with --sdg-entry <path to build/index.js>.
+ * The generator server is a pinned siglent-sdg-mcp release from npm (run with
+ * npx; --sdg-version <x.y.z> picks another), or a local build with
+ * --sdg-entry <path to build/index.js>.
  *
  * For each signal, the scope's own measurements (read with PAVA?, which adds
  * nothing to the display) and an independent analysis of the get_waveform
  * samples are checked against what the generator was asked to produce.
  *
- * Safety: aborts if a generator output is already ON; switches C1 ON only after
- * the waveform is set; at most 2 Vpp; always switches the output OFF at the
- * end, also after a failure; restores and verifies both instruments' settings.
+ * Safety: aborts if a generator output is already ON, or if C1 has modulation,
+ * sweep or burst on; switches C1 ON only after the waveform is set; at most
+ * 2 Vpp. At the end, also after a failure or a first Ctrl-C, it switches the
+ * output OFF in a fresh session and reads it back, and warns if it can't
+ * confirm that. A second Ctrl-C quits at once and skips this.
+ *
+ * Restores what it changes and reads it back: on the scope, C1 attenuation,
+ * coupling, V/div, offset and trace, timebase, trigger delay, mode, level,
+ * slope and source, and the waveform transfer setup; on the generator, the C1
+ * load and basic wave (type, frequency, amplitude, offset, phase, and duty or
+ * symmetry). Other basic-wave parameters (pulse width and edges, noise, the
+ * arbitrary-wave selection) aren't restored; the read-back reports it.
  * The scope serves one TCP client at a time: close EasyScopeX and other MCP
  * servers using it first.
  */
@@ -29,22 +39,47 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+// The generator server release this check was last run against. Pinned, so a
+// run is reproducible and doesn't start whatever was published most recently.
+const SDG_VERSION = "2.0.4";
+
 const args = process.argv.slice(2);
-const entryFlag = args.indexOf("--sdg-entry");
-const sdgEntry = entryFlag >= 0 ? args.splice(entryFlag, 2)[1] : undefined;
+const option = (name) => {
+  const i = args.indexOf(name);
+  if (i < 0) return undefined;
+  const value = args.splice(i, 2)[1];
+  return value ?? "";
+};
+const sdgEntry = option("--sdg-entry");
+const sdgVersion = option("--sdg-version") ?? SDG_VERSION;
 const [sdgIp, sdsIp] = args;
-if (!sdgIp || !sdsIp || (entryFlag >= 0 && !sdgEntry)) {
-  console.error("Usage: npm run e2e-loopback -- <generator-ip> <scope-ip> [--sdg-entry <path>]");
+if (!sdgIp || !sdsIp || sdgEntry === "" || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(sdgVersion)) {
+  console.error("Usage: npm run e2e-loopback -- <generator-ip> <scope-ip> [--sdg-entry <path> | --sdg-version <x.y.z>]");
   process.exit(2);
 }
 const sdsEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "build", "index.js");
-// The generator server: a local build, or the latest release from npm.
+// The generator server: a local build, or a pinned release from npm.
 const sdgCommand = sdgEntry
   ? { command: process.execPath, args: [sdgEntry] }
-  : { command: "npx", args: ["--yes", "siglent-sdg-mcp@latest"] };
+  : { command: "npx", args: ["--yes", `siglent-sdg-mcp@${sdgVersion}`] };
 const sdsCommand = { command: process.execPath, args: [sdsEntry] };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Ctrl-C: the first one stops the test and lets the cleanup run (output OFF,
+// settings restored); a second one quits at once. A Ctrl-C in the terminal
+// also stops the child servers, so the cleanup starts fresh sessions.
+let interrupted = false;
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    if (interrupted) {
+      console.log("\n  Quitting without cleanup. Check that the generator's C1 output is OFF.");
+      process.exit(130);
+    }
+    interrupted = true;
+    console.log("\n  Interrupted: switching the output off and restoring settings. Press Ctrl-C again to quit at once.");
+  });
+}
 let passed = 0;
 let failed = 0;
 function check(label, ok, detail = "") {
@@ -52,11 +87,21 @@ function check(label, ok, detail = "") {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? `  [${detail}]` : ""}`);
 }
 
-async function start(server, env) {
+/** The last lines each server wrote to stderr, printed when something fails. */
+const serverLogs = new Map();
+
+async function start(name, server, env) {
   const transport = new StdioClientTransport({
     ...server,
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env },
     stderr: "pipe",
+  });
+  // Drain stderr (a full pipe would stall the server) and keep the tail.
+  const log = [];
+  serverLogs.set(name, log);
+  transport.stderr?.on("data", (chunk) => {
+    log.push(...String(chunk).split("\n").filter(Boolean));
+    log.splice(0, Math.max(0, log.length - 20));
   });
   const client = new Client({ name: "e2e", version: "1.0.0" });
   await client.connect(transport);
@@ -69,7 +114,10 @@ async function start(server, env) {
       return { ok: false, text: err instanceof Error ? err.message : String(err) };
     }
   };
+  // For the test steps: stops at the next step after a Ctrl-C. The cleanup
+  // uses call(), which doesn't.
   const must = async (name, args = {}) => {
+    if (interrupted) throw new Error("interrupted");
     const r = await call(name, args);
     if (!r.ok) throw new Error(`${name}(${JSON.stringify(args)}) failed: ${r.text}`);
     return r.text;
@@ -89,6 +137,7 @@ const fmt = (v, unit = "") => (Number.isFinite(v) ? `${+v.toPrecision(4)}${unit}
 async function pava(sds, param) {
   const vals = [];
   for (let i = 0; i < 3; i++) {
+    if (interrupted) throw new Error("interrupted");
     const r = await sds.call("scpi_query", { command: `C1:PAVA? ${param}` });
     vals.push(r.ok ? num(r.text) : NaN);
     await sleep(300);
@@ -153,15 +202,21 @@ const SCENARIOS = [
   },
 ];
 
-const SDS_SETTINGS = ["C1:ATTN?", "C1:CPL?", "C1:VDIV?", "C1:OFST?", "C1:TRA?", "TDIV?", "TRMD?", "TRSE?", "C1:TRLV?", "C1:TRSL?", "WFSU?"];
+// Restored in this order. TRSE comes after C1:TRLV and C1:TRSL: setting a
+// channel's trigger level makes that channel the trigger source.
+const SDS_SETTINGS = [
+  "C1:ATTN?", "C1:CPL?", "C1:VDIV?", "C1:OFST?", "C1:TRA?",
+  "TDIV?", "TRDL?", "TRMD?", "C1:TRLV?", "C1:TRSL?", "TRSE?", "WFSU?",
+];
 
 async function main() {
   console.log(`End-to-end: SDG ${sdgIp} C1 -> coax -> SDS ${sdsIp} C1\n`);
-  const sdg = await start(sdgCommand, { SIGLENT_SDG_IP: sdgIp });
-  const sds = await start(sdsCommand, { SIGLENT_IP: sdsIp });
+  const sdg = await start("generator", sdgCommand, { SIGLENT_SDG_IP: sdgIp });
+  const sds = await start("scope", sdsCommand, { SIGLENT_IP: sdsIp });
+  // Set once the generator's original state is read, before anything on it
+  // changes: from then on the cleanup switches the output OFF and restores.
   let sdgOriginal;
   let sdsOriginal;
-  let outputTouched = false;
 
   try {
     console.log("Setup");
@@ -178,13 +233,24 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    sdgOriginal = { bswv: await sdg.must("get_basic_wave", { channel: "C1" }), outp: outs.C1 };
-    sdsOriginal = {};
+    // Modulation, sweep or burst would change the signal on C1.
+    for (const tool of ["get_modulation", "get_sweep", "get_burst"]) {
+      const state = await sdg.must(tool, { channel: "C1" });
+      if (/STATE,ON/.test(state)) {
+        console.log(`\n  ABORT: switch off modulation, sweep and burst on the generator's C1 first. ${state.trim()}`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    const bswv = await sdg.must("get_basic_wave", { channel: "C1" });
+    const settings = {};
     for (const q of SDS_SETTINGS) {
       const r = await sds.call("scpi_query", { command: q });
       if (!r.ok || !r.text.trim()) throw new Error(`could not read ${q}: ${r.text}`);
-      sdsOriginal[q] = r.text.trim();
+      settings[q] = r.text.trim();
     }
+    sdgOriginal = { bswv, outp: outs.C1 };
+    sdsOriginal = settings;
     console.log(`  info  SDG C1 before: ${sdgOriginal.bswv.trim()} | ${sdgOriginal.outp.trim()}`);
     console.log(`  info  SDS before: ${JSON.stringify(sdsOriginal)}`);
 
@@ -211,10 +277,7 @@ async function main() {
       await sdg.must("configure_basic_wave", { channel: "C1", ...sc.wave });
       await sds.must("configure_channel", { channel: "C1", vdiv: sc.scope.vdiv, offset: sc.scope.offset });
       await sds.must("configure_acquisition", { timebase: sc.scope.timebase, trigger_level: sc.scope.trigger_level });
-      if (!outputTouched) {
-        await sdg.must("configure_output", { channel: "C1", state: "ON" });
-        outputTouched = true;
-      }
+      await sdg.must("configure_output", { channel: "C1", state: "ON" });
 
       // The generator reports what it was asked to generate.
       const bswv = await sdg.must("get_basic_wave", { channel: "C1" });
@@ -286,55 +349,82 @@ async function main() {
     pk = await pava(sds, "PKPK");
     check("signal gone after output OFF (Pk-Pk < 0.1 V)", pk < 0.1, `PKPK ${fmt(pk, " V")}`);
   } catch (err) {
-    check("test ran without an exception", false, err instanceof Error ? err.message : String(err));
+    const message = err instanceof Error ? err.message : String(err);
+    check(interrupted ? "test completed (interrupted)" : "test ran without an exception", false, message);
   } finally {
-    // 1. Output OFF, whatever happened, and verify it.
-    if (outputTouched) {
-      await sdg.call("configure_output", { channel: "C1", state: "OFF" });
-      const o = await sdg.call("get_output", { channel: "C1" });
-      check("SDG C1 output OFF at the end", /OUTP OFF/.test(o.text), o.text.trim());
-      if (!/OUTP OFF/.test(o.text)) {
-        console.log("\n  WARNING: could not confirm that the generator's C1 output is OFF.");
-        console.log("  Check the front panel and switch the output off by hand.\n");
-      }
-    }
-    // 2. Restore the generator's C1 waveform and load.
-    if (sdgOriginal) {
-      const b = sdgOriginal.bswv;
-      const f = (k) => num((new RegExp(`${k},([^,]+)`).exec(b) ?? [])[1]);
-      const type = /WVTP,(\w+)/.exec(b)?.[1];
-      const load = /LOAD,(\w+)/.exec(sdgOriginal.outp)?.[1];
-      const args = { channel: "C1", waveform_type: type, frequency: f("FRQ"), amplitude: f("AMP"), offset: f("OFST"), phase: f("PHSE") };
-      if (type === "SQUARE" || type === "PULSE") args.duty = f("DUTY");
-      // Load first: the amplitude the generator reports depends on it.
-      const r2 = load ? await sdg.call("configure_output", { channel: "C1", state: "OFF", load }) : { ok: true };
-      const r1 = await sdg.call("configure_basic_wave", args);
-      const now = await sdg.call("get_basic_wave", { channel: "C1" });
-      check("SDG C1 waveform and load restored", r1.ok && r2.ok && now.text.trim() === b.trim(), now.text.trim().slice(0, 90));
-    }
     await sdg.close();
     await sds.close();
-    // 3. Restore the scope in a raw-SCPI session (its tools don't cover TRSE or WFSU).
-    if (sdsOriginal) {
-      await sleep(500);
-      const raw = await start(sdsCommand, { SIGLENT_IP: sdsIp, SIGLENT_ALLOW_RAW_SCPI: "true" });
-      try {
-        await raw.must("connect");
-        for (const [q, value] of Object.entries(sdsOriginal)) {
-          await raw.call("scpi_command", { command: `${q.replace("?", "")} ${value}` });
-        }
-        const back = {};
-        for (const q of SDS_SETTINGS) back[q] = (await raw.call("scpi_query", { command: q })).text.trim();
-        const diff = SDS_SETTINGS.filter((q) => back[q] !== sdsOriginal[q]);
-        check("SDS settings restored", diff.length === 0, diff.length ? diff.map((q) => `${q} ${back[q]} != ${sdsOriginal[q]}`).join("; ") : "all match");
-      } catch (err) {
-        check("SDS settings restored", false, err instanceof Error ? err.message : String(err));
-      } finally {
-        await raw.close();
+    // Fresh sessions for the cleanup: the test's sessions may have failed, or
+    // been stopped by a Ctrl-C.
+    if (sdgOriginal) await restoreGenerator(sdgOriginal);
+    if (sdsOriginal) await restoreScope(sdsOriginal);
+    if (failed > 0) {
+      for (const [name, log] of serverLogs) {
+        if (log.length) console.log(`\n  ${name} server stderr (last lines):\n    ${log.join("\n    ")}`);
       }
     }
     console.log(`\n${passed} passed, ${failed} failed`);
     process.exitCode = failed === 0 && process.exitCode !== 1 ? 0 : 1;
+  }
+}
+
+/**
+ * Output OFF and read it back, whatever happened. The waveform is restored
+ * only once OFF is confirmed: the original could be a high amplitude.
+ */
+async function restoreGenerator(original) {
+  console.log("\nCleanup: generator");
+  const sdg = await start("generator (cleanup)", sdgCommand, { SIGLENT_SDG_IP: sdgIp });
+  try {
+    const conn = await sdg.call("connect");
+    await sdg.call("configure_output", { channel: "C1", state: "OFF" });
+    const o = await sdg.call("get_output", { channel: "C1" });
+    const off = conn.ok && /OUTP OFF/.test(o.text);
+    check("SDG C1 output OFF", off, o.text.trim());
+    if (!off) {
+      console.log("\n  WARNING: could not confirm that the generator's C1 output is OFF.");
+      console.log("  Check the front panel and switch the output off by hand.");
+      console.log("  The C1 waveform was not restored.\n");
+      return;
+    }
+    const b = original.bswv;
+    const f = (k) => num((new RegExp(`${k},([^,]+)`).exec(b) ?? [])[1]);
+    const type = /WVTP,(\w+)/.exec(b)?.[1];
+    const load = /LOAD,(\w+)/.exec(original.outp)?.[1];
+    const args = { channel: "C1", waveform_type: type, frequency: f("FRQ"), amplitude: f("AMP"), offset: f("OFST"), phase: f("PHSE") };
+    if (type === "SQUARE" || type === "PULSE") args.duty = f("DUTY");
+    if (type === "RAMP") args.symmetry = f("SYM");
+    // Load first: the amplitude the generator reports depends on it.
+    if (load) await sdg.call("configure_output", { channel: "C1", state: "OFF", load });
+    await sdg.call("configure_basic_wave", args);
+    const nowOut = await sdg.call("get_output", { channel: "C1" });
+    const nowWave = await sdg.call("get_basic_wave", { channel: "C1" });
+    check("SDG C1 load restored", /LOAD,(\w+)/.exec(nowOut.text)?.[1] === load, nowOut.text.trim());
+    check("SDG C1 waveform restored", nowWave.text.trim() === b.trim(), nowWave.text.trim().slice(0, 90));
+  } finally {
+    await sdg.close();
+  }
+}
+
+/** The scope's tools don't cover TRSE, TRDL or WFSU, so this uses raw SCPI. */
+async function restoreScope(original) {
+  console.log("\nCleanup: scope");
+  await sleep(500); // the scope serves one client at a time
+  const raw = await start("scope (cleanup)", sdsCommand, { SIGLENT_IP: sdsIp, SIGLENT_ALLOW_RAW_SCPI: "true" });
+  try {
+    const conn = await raw.call("connect");
+    if (!conn.ok) throw new Error(conn.text);
+    for (const q of SDS_SETTINGS) {
+      await raw.call("scpi_command", { command: `${q.replace("?", "")} ${original[q]}` });
+    }
+    const back = {};
+    for (const q of SDS_SETTINGS) back[q] = (await raw.call("scpi_query", { command: q })).text.trim();
+    const diff = SDS_SETTINGS.filter((q) => back[q] !== original[q]);
+    check("SDS settings restored", diff.length === 0, diff.length ? diff.map((q) => `${q} ${back[q]} != ${original[q]}`).join("; ") : "all match");
+  } catch (err) {
+    check("SDS settings restored", false, err instanceof Error ? err.message : String(err));
+  } finally {
+    await raw.close();
   }
 }
 
