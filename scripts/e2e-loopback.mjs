@@ -41,7 +41,7 @@ import path from "node:path";
 
 // The generator server release this check was last run against. Pinned, so a
 // run is reproducible and doesn't start whatever was published most recently.
-const SDG_VERSION = "2.0.4";
+const SDG_VERSION = "2.0.5";
 
 const args = process.argv.slice(2);
 const option = (name) => {
