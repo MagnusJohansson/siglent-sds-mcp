@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.1
+
+### Fixed
+
+- `get_waveform` decoded negative samples one ADC code (`vdiv/25`) too high, and read `0xFF` as 0 instead of -1. The scope sends each sample as a signed byte; the code subtracted 255 from values above 127, as the programming guide says, instead of 256. The error was at most 4 % of a division per sample and shifted the mean of a signal centred on zero by about half a code. The end-to-end loopback check found it: the mean of the downloaded samples differed from the scope's own `MEAN` measurement by half a code at two different V/div settings. After the fix they agree within 1 mV.
+
+### Added
+
+- `npm run e2e-loopback -- <generator-ip> <scope-ip>`: an end-to-end check against real hardware. A Siglent SDG generator's CH1 output is connected to the scope's CH1 with a coax cable. The check generates signals through siglent-sdg-mcp, measures them through this server, and compares the scope's measurements and the downloaded samples with what was generated. It restores both instruments' settings and always switches the generator output off.
+
+### Dependencies
+
+- `@types/node` 22.19.9 → 22.20.5 (development only).
+
 ## 2.0.0
 
 Security release. Tool arguments come from a language model and are now treated as untrusted input. See [docs/threat-model.md](docs/threat-model.md) for the full analysis.

@@ -68,13 +68,13 @@ export function registerWaveformTools(server: McpServer): void {
         // Request waveform data (binary block response)
         const rawData = await connection.queryBinary(`${channel}:WF? DAT2`);
 
-        // Convert raw bytes to voltage values
+        // Convert raw bytes to voltage values. Each byte is a signed 8-bit
+        // code: 0xFF is -1 and 0x80 is -128. The programming guide says to
+        // subtract 255 from values above 127, which maps 0xFF to 0 and reads
+        // every negative sample one code (vdiv/25) too high.
         const voltages: number[] = [];
         for (let i = 0; i < rawData.length; i++) {
-          let codeValue = rawData[i];
-          if (codeValue > 127) {
-            codeValue = codeValue - 255;
-          }
+          const codeValue = rawData[i] > 127 ? rawData[i] - 256 : rawData[i];
           voltages.push(codeValue * (vdiv / 25) - ofst);
         }
 

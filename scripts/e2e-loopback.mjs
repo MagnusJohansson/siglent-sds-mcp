@@ -123,7 +123,7 @@ async function analyseWaveform(sds) {
   // below the midpoint (top and base of a square wave).
   const top = median(v.filter((x) => x > mid));
   const base = median(v.filter((x) => x <= mid));
-  return { points: v.length, total: wf.total_points, vpp: max - min, ampl: top - base, mean, freq, high, cycles: rising.length - 1 };
+  return { points: v.length, total: wf.total_points, vdiv: wf.volts_per_div, vpp: max - min, ampl: top - base, mean, freq, high, cycles: rising.length - 1 };
 }
 
 const SCENARIOS = [
@@ -260,6 +260,19 @@ async function main() {
         check("waveform: top - base within 10 %", within(w.ampl, e.vpp, e.vpp * 0.1), `${fmt(w.ampl, " V")} (max - min ${fmt(w.vpp, " V")})`);
       }
       check("waveform: mean within 5 % of Vpp + 30 mV", within(w.mean, e.mean, e.vpp * 0.05 + 0.03), `${fmt(w.mean, " V")}`);
+      // One ADC code is vdiv/25. Decoding the sample bytes wrongly (e.g.
+      // subtracting 255 instead of 256 for negative codes) shifts the mean by
+      // about half a code; agreement within a quarter code rules that out.
+      // Only with zero scope offset: get_waveform applies the nominal offset,
+      // while the scope's MEAN uses its calibrated one, which may differ by
+      // about 1 % of the offset (within the scope's offset accuracy).
+      if (sc.scope.offset === "0V") {
+        check(
+          "waveform mean agrees with scope MEAN within 1/4 code",
+          Math.abs(w.mean - mean) <= w.vdiv / 100,
+          `${fmt((w.mean - mean) * 1000, " mV")} apart, 1/4 code = ${fmt((w.vdiv / 100) * 1000, " mV")}`
+        );
+      }
       if (e.duty !== undefined) {
         check("waveform: time above midpoint 50 % +/- 3", within(w.high * 100, e.duty, 3), `${fmt(w.high * 100, " %")}`);
       }

@@ -168,8 +168,19 @@ describe("get_waveform", () => {
     expect(data[3].voltage).toBeCloseTo(3.0, 5);     // code 75
     expect(data[4].voltage).toBeCloseTo(4.0, 5);     // code 100
     expect(data[5].voltage).toBeCloseTo(5.0, 5);     // code 125
-    // code 150 > 127 => codeValue = 150 - 255 = -105. voltage = -105 * 0.04 = -4.2
-    expect(data[6].voltage).toBeCloseTo(-4.2, 5);
+    // Signed byte: code 150 => 150 - 256 = -106. voltage = -106 * 0.04 = -4.24
+    expect(data[6].voltage).toBeCloseTo(-4.24, 5);
+  });
+
+  it("reads each byte as a signed 8-bit code", async () => {
+    mockConnection.queryBinary.mockImplementation(async (cmd: string) => {
+      if (cmd.includes(":WF? DAT2")) return Buffer.from([0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff]);
+      throw new Error(`Unexpected binary query: ${cmd}`);
+    });
+    const result = await callTool(client, "get_waveform", { channel: "C1" });
+    const data = JSON.parse(getText(result)).data as Array<{ voltage: number }>;
+    // vdiv=1V => 0.04 V per code. 0xFF is -1, not 0, and 0x80 is -128.
+    expect(data.map((d) => +(d.voltage / 0.04).toFixed(6))).toEqual([0, 1, 127, -128, -2, -1]);
   });
 
   it("downsamples when max_points < total points", async () => {
