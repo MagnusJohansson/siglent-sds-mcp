@@ -7,7 +7,9 @@
  *
  * - Injection probes try to change the timebase (TDIV) and the check reads it
  *   back: the payload is harmless and easy to verify. The SET50? probe reads
- *   the trigger level back instead, after setting it away from the middle.
+ *   the trigger level back instead, after setting it to 300 mV: run with no
+ *   signal on the trigger channel, or one not centred near 300 mV, or a SET50
+ *   that ran would leave the level where it was and the probe would pass.
  * - Changes C1 volts/div, the timebase, trigger settings and the waveform
  *   transfer setup (WFSU) while it runs, and restores the values it read at
  *   the start, also if a check fails or throws.
