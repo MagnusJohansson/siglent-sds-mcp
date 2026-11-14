@@ -48,13 +48,14 @@ export function assertWireSafe(cmd: string): void {
 
 /**
  * Query shape: an optional root colon or '*', a header, then '?' immediately
- * after it, optionally followed by parameters.
+ * after it, optionally followed by parameters. Every node of the header is
+ * non-empty: "C1::VDIV?" and "C1:VDIV:?" are not queries.
  *
  * This is a structural check (allowlist of shape), not a denylist of setter
  * keywords, so long-form headers or unusual setters cannot slip through:
  * anything without '?' directly after the header is not a query.
  */
-const QUERY_PATTERN = /^(\*|:)?([A-Za-z][A-Za-z0-9_:]*)\?(?: ([A-Za-z0-9_,.+\-"/ ]*))?$/;
+const QUERY_PATTERN = /^(\*|:)?([A-Za-z][A-Za-z0-9_]*(?::[A-Za-z][A-Za-z0-9_]*)*)\?(?: ([A-Za-z0-9_,.+\-"/ ]*))?$/;
 
 /**
  * Queries that legitimately take parameters after the '?'. For any other
@@ -83,32 +84,67 @@ const QUERY_PARAMETER_RULES: Array<{ name: string; header: RegExp; params: RegEx
 const COMMON_QUERIES = new Set(["IDN", "OPC", "STB", "ESE", "SRE", "OPT"]);
 
 /**
+ * A header pattern for the lists below. SDS headers are fixed names, a long
+ * and a short form ("AUTO_SETUP", "ASET"), not SCPI mnemonics with a variable
+ * short form. Blocking more spellings than the guide documents is the safe
+ * direction, so a pattern also matches:
+ * - a source prefix of letters and a number (C1:, B1:, M1:, F1:), which many
+ *   SDS headers take. A prefix without a number is a different command:
+ *   TRUART:STOP? is a documented query (UART stop bits), not the STOP action.
+ * - a numeric suffix on any node (ASET1), which SCPI parsers commonly accept.
+ */
+function headerPattern(spec: string): RegExp {
+  const nodes = spec.split(":").map((node) => `(?:${node})\\d*`);
+  return new RegExp(`^(?:[A-Z]{1,4}\\d+:)?${nodes.join(":")}$`, "i");
+}
+
+/**
  * Queries that read a status register and clear it as a side effect, so a
  * tool that promises to be read-only must not send them. INR? is documented
  * as read-and-clear in the SDS programming guide; CMR?, EXR? and DDR? are the
  * equivalent error registers on earlier Siglent/LeCroy firmware.
  */
-const READ_AND_CLEAR_QUERIES = new Set(["INR", "CMR", "EXR", "DDR"]);
+const READ_AND_CLEAR_QUERIES = ["INR", "CMR", "EXR", "DDR"].map((spec) => ({
+  spec,
+  header: headerPattern(spec),
+}));
 
 /**
- * Siglent action commands with no documented query form. The shape check
- * can't tell "ASET?" from a real query, and whether the firmware runs the
- * action is undocumented. Defence in depth, not the primary control:
- * undocumented headers remain a residual risk (see docs/threat-model.md).
+ * Commands the SDS programming guide documents as "Command" only, with no
+ * query form: actions (arm, stop, auto setup, clear, save, recall) and setters.
+ * The shape check can't tell "ASET?" from a real query, and whether the
+ * firmware ignores the '?' or runs the command isn't documented, so a tool
+ * marked read-only must not send them. *RST, *RCL and *SAV are covered by
+ * COMMON_QUERIES. Undocumented headers remain a residual risk (see
+ * docs/threat-model.md); a unit test checks that every query the guide
+ * documents still passes.
  */
-const ACTION_HEADERS = new Set([
-  "ARM",
-  "ARM_ACQUISITION",
+const ACTION_HEADERS = [
+  "ARM_ACQUISITION|ARM",
   "STOP",
-  "ASET",
-  "AUTO_SETUP",
-  "FRTR",
-  "FORCE_TRIGGER",
-  "PACL",
-  "PARAMETER_CLR",
-  "SCDP",
-  "SCREEN_DUMP",
-]);
+  "AUTO_SETUP|ASET",
+  "FORCE_TRIGGER|FRTR",
+  "SET50",
+  "DCPA",
+  "DCIC|DCSP|DCUT|DCCN|DCLN",
+  "PARAMETER_CUSTOM|PACU",
+  "MEASURE_CLEAR|MEACL",
+  "MEASURE_GATE_SWITCH|MEGS",
+  "MEASURE_GATEA|MEGA",
+  "MEASURE_GATEB|MEGB",
+  "PARAMETER_CLR|PACL",
+  "PF_CREATEM|PFCM",
+  "RECALL_PANEL|RCPN",
+  "RECALL|REC",
+  "STORE_PANEL|STPN",
+  "REF_CLOSE|REFCL",
+  "REF_SAVE|REFSA",
+  "TRSPI:DATA",
+  "ARBWAVE|ARWV",
+  "CURSOR_AUTO|CRAU",
+  // A binary screen dump: never through the text query path.
+  "SCREEN_DUMP|SCDP",
+].map((spec) => ({ spec, header: headerPattern(spec) }));
 
 export function assertIsQuery(cmd: string): void {
   assertWireSafe(cmd);
@@ -128,15 +164,18 @@ export function assertIsQuery(cmd: string): void {
         `${[...COMMON_QUERIES].map((q) => `*${q}?`).join(", ")} are permitted.`
     );
   }
-  // The whole header, not its last segment: TRUART:STOP? is a documented
-  // query (UART stop bits), not the STOP action.
-  if (ACTION_HEADERS.has(name)) {
-    throw new ScpiPolicyError(`"${name}" is an action command, not a query.`);
-  }
-  if (READ_AND_CLEAR_QUERIES.has(name)) {
-    throw new ScpiPolicyError(
-      `"${name}?" is not allowed: reading this status register also clears it.`
-    );
+  if (prefix !== "*") {
+    const action = ACTION_HEADERS.find((a) => a.header.test(header));
+    if (action) {
+      throw new ScpiPolicyError(
+        `"${name}" is an action command (${action.spec}) with no documented query form, not a query.`
+      );
+    }
+    if (READ_AND_CLEAR_QUERIES.some((r) => r.header.test(header))) {
+      throw new ScpiPolicyError(
+        `"${name}?" is not allowed: reading this status register also clears it.`
+      );
+    }
   }
   if (params !== undefined && params.trim() !== "") {
     const rule = QUERY_PARAMETER_RULES.find((r) => r.header.test(header));

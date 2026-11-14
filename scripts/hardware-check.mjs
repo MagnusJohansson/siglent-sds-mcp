@@ -160,6 +160,7 @@ async function runChecks(s) {
     ["F1 parameters after query header", "scpi_query", { command: `TDIV? ${payloadTdiv}` }],
     ["F1 reset in query form", "scpi_query", { command: "*RST?" }],
     ["F1 auto setup in query form", "scpi_query", { command: "ASET?" }],
+    ["F1 trigger-level action in query form", "scpi_query", { command: "SET50?" }],
     ["F2 newline injection in vdiv", "configure_channel", { channel: "C1", vdiv: `500mV\nTDIV ${payloadTdiv}` }],
     ["F2 compound injection in trigger_level", "configure_acquisition", { trigger_level: `0V;TDIV ${payloadTdiv}` }],
     ["F2 newline injection in timebase", "configure_acquisition", { timebase: `1MS\nTDIV ${payloadTdiv}` }],
