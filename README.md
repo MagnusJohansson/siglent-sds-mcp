@@ -49,7 +49,7 @@ Replace `192.168.1.126` with your scope's IP address.
 
 No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 or Docker Desktop).
 
-The image runs the server as an unprivileged user (`node`, UID 1000). The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
+The image runs the server as an unprivileged user (`node`, UID 1000) and contains no setuid or setgid binaries. The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
 
 ```json
 {
@@ -350,7 +350,7 @@ Tool arguments come from a language model, which may have been steered by conten
 - **Strict formats** for every free-text parameter: voltages (`500mV`), times (`1US`).
 - **`connect` is restricted** to `SIGLENT_IP`, `SIGLENT_ALLOWED_HOSTS`, or, if neither is set, private-LAN IP addresses, on the instrument port. Loopback, link-local (cloud metadata) and host names are refused. The same check applies to automatic reconnects.
 - **Raw `scpi_command` is off by default.** Set `SIGLENT_ALLOW_RAW_SCPI=true` to enable it; it also requires named hosts (`*` is not accepted).
-- **The Docker image runs unprivileged:** as `node` (UID 1000), with the app files owned by root. The documented `docker run` adds `--read-only --cap-drop=ALL --security-opt=no-new-privileges`, and every release checks that the image starts that way. A compromised server process can't modify its own code or use root inside the container as a step towards the host.
+- **The Docker image runs unprivileged:** as `node` (UID 1000), with the app files owned by root and no setuid or setgid binaries. The documented `docker run` adds `--read-only --cap-drop=ALL --security-opt=no-new-privileges`. Before publishing, every release checks that the image built from the release commit doesn't run as root and starts with those flags. A compromised server process can't modify its own code or use root inside the container as a step towards the host.
 - **Replies stay matched to their queries.** After a timeout, or if a command unexpectedly produces output, the connection is reset so a late reply can't be read as the answer to the next query.
 
 **What it does not protect against:**
