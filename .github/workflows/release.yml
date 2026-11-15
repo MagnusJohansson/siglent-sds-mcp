@@ -73,6 +73,15 @@ jobs:
       - name: Test
         run: npm test
 
+      # The image must not run as root, and must start with the hardening
+      # flags the README documents. Checked here, before npm, because an npm
+      # version can't be republished. This builds for the runner's
+      # architecture; the user is part of the image config, the same on both.
+      - name: Build and check the image
+        run: |
+          docker build -t image-check .
+          scripts/check-image.sh image-check
+
   npm:
     needs: verify
     runs-on: ubuntu-latest

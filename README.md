@@ -49,6 +49,8 @@ Replace `192.168.1.126` with your scope's IP address.
 
 No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 or Docker Desktop).
 
+The image runs the server as an unprivileged user (`node`, UID 1000) and contains no setuid or setgid binaries. The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
+
 ```json
 {
   "mcpServers": {
@@ -57,6 +59,7 @@ No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 o
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
       ]
@@ -154,6 +157,7 @@ Edit `claude_desktop_config.json`:
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
       ]
@@ -198,6 +202,7 @@ You can also add servers through the UI: **Settings > Cursor Settings > MCP > Ad
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
       ]
@@ -240,6 +245,7 @@ You can also configure servers through the UI: **Cascade panel > MCP icon > Mana
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
       ]
@@ -284,6 +290,7 @@ Configuration is managed through the IDE's UI:
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_IP=192.168.1.126",
         "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"
       ]
@@ -343,6 +350,7 @@ Tool arguments come from a language model, which may have been steered by conten
 - **Strict formats** for every free-text parameter: voltages (`500mV`), times (`1US`).
 - **`connect` is restricted** to `SIGLENT_IP`, `SIGLENT_ALLOWED_HOSTS`, or, if neither is set, private-LAN IP addresses, on the instrument port. Loopback, link-local (cloud metadata) and host names are refused. The same check applies to automatic reconnects.
 - **Raw `scpi_command` is off by default.** Set `SIGLENT_ALLOW_RAW_SCPI=true` to enable it; it also requires named hosts (`*` is not accepted).
+- **The Docker image runs unprivileged:** as `node` (UID 1000), with the app files owned by root and no setuid or setgid binaries. The documented `docker run` adds `--read-only --cap-drop=ALL --security-opt=no-new-privileges`. Before publishing, every release checks that the image built from the release commit doesn't run as root, has no setuid or setgid binaries, and starts with those flags. A compromised server process can't modify its own code or use root inside the container as a step towards the host.
 - **Replies stay matched to their queries.** After a timeout, or if a command unexpectedly produces output, the connection is reset so a late reply can't be read as the answer to the next query.
 
 **What it does not protect against:**
@@ -436,6 +444,7 @@ Then use the local image in your `.mcp.json`:
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "-e", "SIGLENT_IP=192.168.1.126",
         "siglent-sds-mcp"
       ]
@@ -483,7 +492,7 @@ By default, Docker containers can reach LAN devices via the bridge network (NAT)
 - Verify the scope is reachable from your host: `telnet 192.168.1.126 5025`
 - On Linux, try adding `--network host` to the Docker args:
   ```json
-  "args": ["run", "--rm", "-i", "--network", "host", "-e", "SIGLENT_IP=192.168.1.126", "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"]
+  "args": ["run", "--rm", "-i", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--network", "host", "-e", "SIGLENT_IP=192.168.1.126", "ghcr.io/magnusjohansson/siglent-sds-mcp:latest"]
   ```
   Note: `--network host` does not work on macOS or Windows Docker Desktop.
 

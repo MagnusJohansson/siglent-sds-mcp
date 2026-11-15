@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.3
+
+### Security
+
+- The Docker image no longer runs the server as root. It runs as the base image's `node` user (UID 1000); the app files stay owned by root, so the server can read them but not change them. The setuid and setgid bits are removed from every file in the image. This is defence in depth: no known flaw lets a caller run code in the server, and with the documented `--rm` the container is discarded after each session. It limits a compromised process inside the container; it doesn't limit what that process could send to the instrument.
+- The README's `docker run` examples add `--read-only --cap-drop=ALL --security-opt=no-new-privileges`. The server writes no files and needs no Linux capabilities. These flags are optional; existing configurations keep working.
+
+### Release process
+
+- `scripts/check-image.sh` checks a built image: it fails if the image's user is root or the image contains setuid or setgid files, and checks that the server answers an MCP `initialize` request when started with the hardening flags. CI runs it on every pull request, and the release workflow runs it before publishing to npm, so a release can't ship an image that runs as root.
+- `scripts/hardware-check.mjs` takes `--docker <image>`, to run the checks against the server in a Docker image with the hardening flags. Hardware check: 24/24 with `--docker` on the new image.
+
 ## 2.0.2
 
 ### Fixed

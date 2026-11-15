@@ -36,3 +36,18 @@ jobs:
 
       - name: Test
         run: npm test
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The image must not run as root, and must start with the hardening
+      # flags the README documents.
+      - name: Build and check the image
+        run: |
+          docker build -t image-check .
+          scripts/check-image.sh image-check
