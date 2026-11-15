@@ -5,7 +5,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { SdsSimulator, SIM_IDN } from "../simulator/sds-simulator.js";
-import { SiglentConnection, type ConnectionOptions } from "../../src/connection.js";
+import { DEFAULT_OPTIONS, SiglentConnection, type ConnectionOptions } from "../../src/connection.js";
+import { assertConnectAllowed } from "../../src/security/host-policy.js";
 
 let sim: SdsSimulator;
 let port: number;
@@ -129,6 +130,14 @@ describe("host policy", () => {
     conn = new SiglentConnection(); // default: private-LAN IPs on 5025 only
     await expect(conn.connect("127.0.0.1", port)).rejects.toThrow(/not allowed/);
     expect(sim.connectionCount()).toBe(0);
+  });
+
+  it("allows private-LAN addresses on 5025 by default", () => {
+    // The allowing half of the default policy; a default that refused
+    // everything would pass the test above.
+    expect(() => assertConnectAllowed("192.168.1.187", 5025, DEFAULT_OPTIONS.hostPolicy)).not.toThrow();
+    expect(() => assertConnectAllowed("10.0.0.5", 5025, DEFAULT_OPTIONS.hostPolicy)).not.toThrow();
+    expect(() => assertConnectAllowed("192.168.1.187", 5026, DEFAULT_OPTIONS.hostPolicy)).toThrow(/not allowed/);
   });
 
   it("applies to automatic reconnects too", async () => {
