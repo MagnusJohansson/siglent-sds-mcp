@@ -12,4 +12,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 COPY --from=builder /app/build ./build
+# Run as the base image's unprivileged "node" user (UID 1000). The app files
+# stay owned by root, so the server can read them but not change them.
+USER node
 ENTRYPOINT ["node", "build/index.js"]

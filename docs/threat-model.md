@@ -55,6 +55,7 @@ Tool annotations such as `readOnlyHint` are **hints for the client, not controls
 | **An undocumented command that answers exactly `1`** without containing `?` would pass for the acknowledgement, and the real one would answer the next query. Only reachable through the opt-in raw `scpi_command`. | Accepted: no such command is known; documented queries and data transfers are rejected before writing. |
 | **Measured data leaves the lab.** Waveforms and screenshots are returned to the model, and so to whoever operates it. | Inherent in the tool's purpose. Don't connect circuits whose signals are confidential. |
 | **Prompt injection via instrument responses** (e.g. a label returned by a query). | Low: responses are short and mostly numeric. |
+| **Code execution inside the server process** (a flaw in the server or a dependency). The process holds the instrument connection. | Limited since 2.0.3: the Docker image runs as `node` (UID 1000), the app files are owned by root, and the documented `docker run` adds `--read-only --cap-drop=ALL --security-opt=no-new-privileges`. CI and the release workflow check that the image doesn't run as root and starts with those flags. With npx or a source build, the server runs as whoever starts it. |
 | **No caller identity in stdio mode.** Whoever can start the process has full access. | Planned: HTTP transport with OAuth 2.1, per-tool scopes. |
 | **No audit trail** of tool calls. | Planned with the HTTP/OAuth work. |
 
