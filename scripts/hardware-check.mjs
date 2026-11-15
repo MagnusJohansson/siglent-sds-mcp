@@ -49,7 +49,8 @@ function check(label, ok, detail = "") {
 const sessions = new Set();
 
 // The server's own environment. With --docker it goes into the container as
-// -e flags; the docker CLI itself only gets PATH and HOME.
+// -e flags; the docker CLI itself only gets PATH, HOME and the variables
+// that select a daemon (DOCKER_HOST, DOCKER_CONTEXT), when they're set.
 function serverCommand(serverEnv) {
   if (!dockerImage) {
     return { command: process.execPath, args: [serverPath], env: { PATH: process.env.PATH ?? "", ...serverEnv } };
@@ -62,7 +63,13 @@ function serverCommand(serverEnv) {
       ...Object.entries(serverEnv).flatMap(([k, val]) => ["-e", `${k}=${val}`]),
       dockerImage,
     ],
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+      ...Object.fromEntries(
+        ["DOCKER_HOST", "DOCKER_CONTEXT"].filter((k) => process.env[k]).map((k) => [k, process.env[k]])
+      ),
+    },
   };
 }
 
