@@ -1,8 +1,18 @@
 import * as net from "node:net";
 import {
+  audit,
+  auditContext,
+  type AuditContext,
+  type DisconnectReason,
+  type Guard,
+  type ScpiKind,
+  type ScpiOutcome,
+} from "./audit/audit.js";
+import {
   assertBinaryQuery,
   assertIsCommand,
   assertIsQuery,
+  ScpiPolicyError,
 } from "./security/scpi-guard.js";
 import { assertConnectAllowed, type HostPolicy } from "./security/host-policy.js";
 
@@ -60,6 +70,15 @@ interface QueuedQuery {
   pre?: string;
   binary: boolean;
   timeout: number;
+  /** Captured at enqueue: the drain runs later, often from another call's socket callback. */
+  ctx: AuditContext;
+  /** Write ids, allocated at enqueue: each gets exactly one scpi.result. */
+  preId?: number;
+  cmdId: number;
+  /** `pre`'s result is recorded (written, or write_failed). */
+  preDone: boolean;
+  cmdWritten: boolean;
+  startedAt?: number;
   /**
    * Checks the reply before anything else is sent. Returns an error message
    * if the reply is out of step; the connection is then reset and queued
@@ -70,6 +89,23 @@ interface QueuedQuery {
   reject: (reason: Error) => void;
 }
 
+/** An error that carries the scpi.result outcome it stands for. */
+function outcomeError(message: string, outcome: ScpiOutcome): Error {
+  return Object.assign(new Error(message), { auditOutcome: outcome });
+}
+
+function guardOf(rule: string): Guard {
+  const prefix = rule.split(".")[0];
+  return prefix === "wire" || prefix === "host" || prefix === "command" || prefix === "binary" ? prefix : "query";
+}
+
+/**
+ * Audit contexts: the ambient context (auditContext()) is read only at the
+ * synchronous start of the public methods tools call (connect, disconnect,
+ * sendCommand, query, queryBinary, checkChannel). Everything that runs later
+ * (the queue drain, timers, socket and write callbacks, reconnects) uses a
+ * context captured earlier or a synthetic one (docs/audit-log-design.md).
+ */
 export class SiglentConnection {
   private options: ConnectionOptions;
   private socket: net.Socket | null = null;
@@ -95,6 +131,8 @@ export class SiglentConnection {
    * is called) must not install its socket or tear down the newer one.
    */
   private connectGeneration = 0;
+  /** The last socket error, for the reason recorded when the socket closes. */
+  private lastSocketError: string | null = null;
 
   constructor(options: Partial<ConnectionOptions> = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -106,12 +144,36 @@ export class SiglentConnection {
   }
 
   async connect(host: string, port: number = this.options.defaultPort): Promise<string> {
+    return this.connectIn(host, port, auditContext());
+  }
+
+  private async connectIn(host: string, port: number, ctx: AuditContext): Promise<string> {
     // Every connect path (tool, auto-connect, reconnect) passes through here.
-    assertConnectAllowed(host, port, this.options.hostPolicy);
+    try {
+      assertConnectAllowed(host, port, this.options.hostPolicy);
+    } catch (err) {
+      if (err instanceof ScpiPolicyError) {
+        audit.guardRefused({ guard: "host", rule: err.rule, message: err.message, host, port }, ctx);
+        audit.instrumentConnect({ host, port, outcome: "refused_by_policy", message: err.message }, ctx);
+      }
+      throw err;
+    }
 
     // Track the attempt so tool calls made meanwhile wait for it (and get its
     // error) instead of queueing on a socket that may not initialize.
-    const attempt = this.openConnection(host, port);
+    const generation = this.connectGeneration + 1;
+    const attempt = this.openConnection(host, port, ctx).then(
+      (idn) => {
+        audit.instrumentConnect({ host, port, outcome: "connected", idn }, ctx);
+        return idn;
+      },
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        const outcome = generation !== this.connectGeneration ? "superseded" : "failed";
+        audit.instrumentConnect({ host, port, outcome, message }, ctx);
+        throw err;
+      }
+    );
     this.connecting = attempt;
     try {
       return await attempt;
@@ -125,12 +187,12 @@ export class SiglentConnection {
     }
   }
 
-  private async openConnection(host: string, port: number): Promise<string> {
+  private async openConnection(host: string, port: number, ctx: AuditContext): Promise<string> {
     const generation = ++this.connectGeneration;
     const superseded = () => generation !== this.connectGeneration;
 
     if (this.socket) {
-      this.close();
+      this.close("Connection closed", "replaced", ctx);
     }
 
     this.host = host;
@@ -165,14 +227,14 @@ export class SiglentConnection {
           this.dataBuffer = Buffer.alloc(0);
 
           // Set CHDR OFF for clean numeric responses
-          await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, "CHDR OFF", (r) =>
+          await this.enqueueQuery("*OPC?", false, DEFAULT_TIMEOUT, ctx, "CHDR OFF", (r) =>
             opcProblem("CHDR OFF", r)
           );
           await this.delay(100);
           if (superseded()) throw new Error("superseded by a newer connect");
 
           // Query identification
-          const idn = (await this.enqueueQuery("*IDN?", false, DEFAULT_TIMEOUT))
+          const idn = (await this.enqueueQuery("*IDN?", false, DEFAULT_TIMEOUT, ctx))
             .toString("utf-8")
             .trim();
           if (superseded()) throw new Error("superseded by a newer connect");
@@ -181,7 +243,7 @@ export class SiglentConnection {
         } catch (err) {
           // Only the current attempt may tear down the shared connection;
           // a superseded one would otherwise kill the newer socket.
-          if (!superseded()) this.close();
+          if (!superseded()) this.close("Connection closed", "init_failed", ctx);
           const msg = err instanceof Error ? err.message : String(err);
           reject(
             new Error(
@@ -206,12 +268,16 @@ export class SiglentConnection {
   }
 
   /** Close the connection and don't auto-reconnect until connect() is called */
-  disconnect(): void {
+  disconnect(why: DisconnectReason = "requested", ctx: AuditContext = auditContext()): void {
     this.autoConnectSuppressed = true;
-    this.close();
+    this.close("Connection closed", why, ctx);
   }
 
-  private close(reason = "Connection closed"): void {
+  /** Close the connection: `reason` for queued work, `why` and `ctx` for the audit log. */
+  private close(reason: string, why: DisconnectReason, ctx: AuditContext): void {
+    if (this.socket) {
+      audit.instrumentDisconnect({ host: this.host, port: this.port, reason: why }, ctx);
+    }
     this.clearIdleTimer();
     const pending = this.queryQueue.splice(0);
     this.queryRunning = false;
@@ -245,7 +311,7 @@ export class SiglentConnection {
    * than an error, so without this check tools return plausible junk.
    */
   async checkChannel(channel: string): Promise<void> {
-    await this.ensureReady();
+    await this.ensureReady(auditContext());
     const count = channelCountFromModel(this.model);
     const n = /^C(\d)$/.exec(channel);
     if (count !== undefined && n && parseInt(n[1], 10) > count) {
@@ -261,10 +327,11 @@ export class SiglentConnection {
   }
 
   async sendCommand(cmd: string): Promise<void> {
+    const ctx = auditContext();
     // The connection is the single choke point to the instrument, so this
     // check applies regardless of which tool built the command.
-    assertIsCommand(cmd);
-    await this.ensureReady();
+    this.guard(() => assertIsCommand(cmd), cmd, ctx);
+    await this.ensureReady(ctx);
     // The scope silently drops commands that arrive while it is still applying
     // the previous one (e.g. a VDIV change takes ~250ms on SDS1202X-E fw 1.3.27).
     // Follow each command with *OPC? and wait for its reply so commands are
@@ -273,7 +340,7 @@ export class SiglentConnection {
     // The two must be separate writes: if "*OPC?" arrives in the same packet
     // the scope mis-parses the command's numeric argument and clamps it
     // (e.g. "TDIV 50US" becomes 1ns).
-    await this.enqueueQuery("*OPC?", false, this.options.commandTimeoutMs, cmd, (r) =>
+    await this.enqueueQuery("*OPC?", false, this.options.commandTimeoutMs, ctx, cmd, (r) =>
       opcProblem(cmd, r)
     );
   }
@@ -281,28 +348,85 @@ export class SiglentConnection {
   async query(cmd: string, timeout: number = DEFAULT_TIMEOUT): Promise<string> {
     // A query must be structurally a query; otherwise "C1:VDIV 5V" sent via a
     // read-only tool would change state and simply time out waiting for a reply.
-    assertIsQuery(cmd);
-    await this.ensureReady();
-    const buf = await this.enqueueQuery(cmd, false, timeout);
+    const ctx = auditContext();
+    this.guard(() => assertIsQuery(cmd), cmd, ctx);
+    await this.ensureReady(ctx);
+    const buf = await this.enqueueQuery(cmd, false, timeout, ctx);
     return buf.toString("utf-8").trim();
   }
 
   async queryBinary(cmd: string, timeout: number = BINARY_TIMEOUT): Promise<Buffer> {
-    assertBinaryQuery(cmd);
-    await this.ensureReady();
-    return this.enqueueQuery(cmd, true, timeout);
+    const ctx = auditContext();
+    this.guard(() => assertBinaryQuery(cmd), cmd, ctx);
+    await this.ensureReady(ctx);
+    return this.enqueueQuery(cmd, true, timeout, ctx);
+  }
+
+  /** Run a guard check, recording a refusal before it propagates. */
+  private guard(check: () => void, cmd: string, ctx: AuditContext): void {
+    try {
+      check();
+    } catch (err) {
+      if (err instanceof ScpiPolicyError) {
+        audit.guardRefused({ guard: guardOf(err.rule), rule: err.rule, message: err.message, command: cmd }, ctx);
+      }
+      throw err;
+    }
   }
 
   private enqueueQuery(
     cmd: string,
     binary: boolean,
     timeout: number,
+    ctx: AuditContext,
     pre?: string,
     validate?: (reply: Buffer) => string | undefined
   ): Promise<Buffer> {
     this.clearIdleTimer();
+    const preId = pre !== undefined ? audit.nextWriteId() : undefined;
+    const cmdId = audit.nextWriteId();
     const result = new Promise<Buffer>((resolve, reject) => {
-      this.queryQueue.push({ cmd, pre, binary, timeout, validate, resolve, reject });
+      // A query settles once: a late callback must not record a second result.
+      let settled = false;
+      const finishPre = () => {
+        if (q.preId !== undefined && !q.preDone) {
+          q.preDone = true;
+          audit.scpiResult({ writeId: q.preId, outcome: "not_written" }, ctx);
+        }
+      };
+      const q: QueuedQuery = {
+        cmd,
+        pre,
+        binary,
+        timeout,
+        validate,
+        ctx,
+        preId,
+        cmdId,
+        preDone: false,
+        cmdWritten: false,
+        resolve: (buf) => {
+          if (settled) return;
+          settled = true;
+          finishPre();
+          audit.scpiResult({ writeId: cmdId, outcome: "replied", startedAt: q.startedAt, reply: buf, binary }, ctx);
+          resolve(buf);
+        },
+        reject: (err) => {
+          if (settled) return;
+          settled = true;
+          finishPre();
+          const tagged = (err as { auditOutcome?: ScpiOutcome }).auditOutcome;
+          // A timeout during a setter's *OPC? gap: the *OPC? was never written.
+          const outcome =
+            tagged === "timeout" && !q.cmdWritten
+              ? "not_written"
+              : (tagged ?? (q.cmdWritten ? "connection_closed" : "not_written"));
+          audit.scpiResult({ writeId: cmdId, outcome, startedAt: q.startedAt }, ctx);
+          reject(err);
+        },
+      };
+      this.queryQueue.push(q);
       this.drainQueue();
     });
     result.then(
@@ -321,7 +445,8 @@ export class SiglentConnection {
     }
     this.queryRunning = true;
 
-    const { cmd, pre, binary, timeout, validate, resolve, reject } = this.queryQueue.shift()!;
+    const q = this.queryQueue.shift()!;
+    const { cmd, pre, binary, timeout, validate, resolve, reject } = q;
 
     this.expectedBinaryLength = null;
     this.binaryDataStart = 0;
@@ -334,58 +459,86 @@ export class SiglentConnection {
       // out of step, nothing else may reach the scope on this connection.
       const problem = validate?.(buf);
       if (problem) {
-        reject(new Error(problem));
-        this.close("Connection reset: an earlier reply was out of step");
+        reject(outcomeError(problem, "out_of_step"));
+        this.close("Connection reset: an earlier reply was out of step", "reset_out_of_step", {
+          requestId: q.ctx.requestId,
+          cause: "reset",
+        });
         return;
       }
       resolve(buf);
       this.drainQueue();
     };
-    this.responseReject = (err) => {
+    const onReject = (err: Error) => {
       this.queryRunning = false;
       reject(err);
       this.drainQueue();
     };
+    this.responseReject = onReject;
 
     this.responseTimer = setTimeout(() => {
       this.clearPending();
       this.queryRunning = false;
       reject(
-        new Error(
+        outcomeError(
           `${binary ? "Binary query" : "Query"} timeout after ${timeout}ms for command: ${pre ? `${pre} (${cmd})` : cmd}. ` +
-            "The connection was reset; the next call reconnects."
+            "The connection was reset; the next call reconnects.",
+          "timeout"
         )
       );
       // A late reply would otherwise be read as the answer to the next query.
       // Resetting the connection discards it with the old socket.
-      this.close("Connection reset after a timeout");
+      this.close("Connection reset after a timeout", "reset_after_timeout", {
+        requestId: q.ctx.requestId,
+        cause: "reset",
+      });
     }, timeout);
 
     // Both writes go to this socket only. If the connection is reset and a
     // new one opened during the gap below, the delayed *OPC? must not land
     // in the new session.
     const socket = this.socket;
-    const writeLine = (line: string, next?: () => void): void => {
+    // Recorded immediately before each write, so an attempt is on record even
+    // if the process dies during it. A setter paced by *OPC? is two writes:
+    // the setter (kind "command") and the *OPC? (kind "opc").
+    const writeLine = (line: string, id: number, kind: ScpiKind, next?: () => void): void => {
+      if (line === cmd) q.cmdWritten = true;
+      q.startedAt ??= Date.now();
+      audit.scpiWrite({ writeId: id, command: line, kind, host: this.host, port: this.port }, q.ctx);
       socket.write(line + "\n", (err) => {
         if (err) {
+          // Only while this query is still the current one: a write error that
+          // arrives after it ended must not clear the next query's state.
+          if (this.responseReject !== onReject) return;
+          if (id === q.preId) {
+            q.preDone = true;
+            audit.scpiResult({ writeId: id, outcome: "write_failed", startedAt: q.startedAt }, q.ctx);
+          }
           this.clearPending();
           this.queryRunning = false;
-          reject(new Error(`Write failed: ${err.message}`));
+          // The *OPC? after a failed setter was never written.
+          reject(outcomeError(`Write failed: ${err.message}`, id === q.preId ? "not_written" : "write_failed"));
           this.drainQueue();
         } else {
+          if (id === q.preId) {
+            q.preDone = true;
+            audit.scpiResult({ writeId: id, outcome: "written", startedAt: q.startedAt }, q.ctx);
+          }
           next?.();
         }
       });
     };
 
     if (pre !== undefined) {
-      writeLine(pre, () =>
+      writeLine(pre, q.preId!, "command", () =>
         setTimeout(() => {
-          if (this.socket === socket && !socket.destroyed) writeLine(cmd);
+          // Skipped if the connection was reset during the gap: the query has
+          // been rejected by then, and its *OPC? is recorded as not_written.
+          if (this.socket === socket && !socket.destroyed) writeLine(cmd, q.cmdId, "opc");
         }, OPC_GAP_MS)
       );
     } else {
-      writeLine(cmd);
+      writeLine(cmd, q.cmdId, binary ? "binary-query" : "query");
     }
   }
 
@@ -396,6 +549,12 @@ export class SiglentConnection {
     });
 
     this.socket!.on("close", () => {
+      // The scope (or the network) closed the socket: no call caused it.
+      audit.instrumentDisconnect(
+        { host: this.host, port: this.port, reason: this.lastSocketError ? "socket_error" : "socket_closed" },
+        { cause: "socket" }
+      );
+      this.lastSocketError = null;
       // Drain queued queries first so drainQueue() in the reject callback is a no-op
       const pending = this.queryQueue.splice(0);
       this.queryRunning = false;
@@ -410,10 +569,17 @@ export class SiglentConnection {
     });
 
     this.socket!.on("error", (err) => {
+      this.lastSocketError = err.message;
+      // Take the queue first: the reject below would otherwise drain the next
+      // query into the dying socket. Queued queries were never written.
+      const pending = this.queryQueue.splice(0);
       if (this.responseReject) {
         this.responseReject(new Error(`Socket error: ${err.message}`));
       }
       this.clearPending();
+      for (const q of pending) {
+        q.reject(new Error(`Socket error: ${err.message}`));
+      }
     });
   }
 
@@ -499,7 +665,7 @@ export class SiglentConnection {
    * timeout or a reset after a timeout. Goes through connect(), so the host
    * policy applies to reconnects too.
    */
-  private async ensureReady(): Promise<void> {
+  private async ensureReady(ctx: AuditContext): Promise<void> {
     if (this.connecting) {
       await this.connecting;
       return;
@@ -510,7 +676,8 @@ export class SiglentConnection {
       throw new Error("Not connected to oscilloscope. Use the 'connect' tool first.");
     }
     const port = this.host ? this.port : this.options.defaultPort;
-    await this.connect(host, port);
+    // The call that needed the connection caused the reconnect.
+    await this.connectIn(host, port, { requestId: ctx.requestId, cause: "reconnect" });
   }
 
   private scheduleIdleClose(): void {
@@ -523,8 +690,9 @@ export class SiglentConnection {
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       if (!this.queryRunning && this.queryQueue.length === 0) {
-        console.error(`Idle for ${ms / 1000}s, releasing the scope connection`);
-        this.close();
+        audit.log(`Idle for ${ms / 1000}s, releasing the scope connection`);
+        // No call caused this; the timer was scheduled from the last query's completion.
+        this.close("Connection closed", "idle", { cause: "idle-close" });
       }
     }, ms);
     // Don't keep the process alive just for this timer

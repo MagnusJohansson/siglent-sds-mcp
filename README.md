@@ -49,7 +49,7 @@ Replace `192.168.1.126` with your scope's IP address.
 
 No Node.js installation required. Works on Linux, macOS, and Windows (via WSL2 or Docker Desktop).
 
-The image runs the server as an unprivileged user (`node`, UID 1000) and contains no setuid or setgid binaries. The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
+The image runs the server as an unprivileged user (`node`, UID 1000) and contains no setuid or setgid binaries. The extra flags below are optional hardening: `--read-only` makes the container's filesystem read-only (the server writes no files unless a [file audit log](#audit-log) is configured, which needs a mounted directory), `--cap-drop=ALL` drops all Linux capabilities, and `--security-opt=no-new-privileges` stops a process from gaining privileges through setuid binaries. The server only needs outbound TCP to the instrument.
 
 ```json
 {
@@ -70,7 +70,7 @@ The image runs the server as an unprivileged user (`node`, UID 1000) and contain
 
 ### Option B: npx
 
-Requires Node.js 20+. Downloads and runs the package automatically.
+Requires Node.js 22.15 or later. Downloads and runs the package automatically.
 
 ```json
 {
@@ -121,6 +121,8 @@ Replace `/path/to/siglent-sds-mcp` with the actual path to your clone.
 | `SIGLENT_PORT` | No | `5025` | TCP port (only change if your setup differs) |
 | `SIGLENT_ALLOWED_HOSTS` | No | — | Comma-separated hosts `connect` may reach besides `SIGLENT_IP`. If neither is set, only private-LAN IP addresses are accepted. |
 | `SIGLENT_ALLOW_RAW_SCPI` | No | `false` | Registers the raw `scpi_command` tool. Requires `SIGLENT_IP` or `SIGLENT_ALLOWED_HOSTS` naming specific hosts. |
+| `SIGLENT_AUDIT_LOG` | No | security events on stderr | `stderr` for the full audit trail on stderr, an absolute file path for the full trail in that file, or `off`. See [Audit log](#audit-log) |
+| `SIGLENT_AUDIT_OTLP` | No | — | `1` to export the audit log to the collector in `OTEL_EXPORTER_OTLP_ENDPOINT`. Not needed with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. Without either endpoint, the server refuses to start. See [Exporting to OpenTelemetry](#exporting-to-opentelemetry) |
 | `SIGLENT_IDLE_TIMEOUT` | No | `0` (never) | Seconds of inactivity after which the scope connection is released (at most about 24 days). The next tool call reconnects automatically. |
 
 Invalid values (e.g. a non-numeric port) stop the server at startup instead of being ignored.
@@ -351,6 +353,7 @@ Tool arguments come from a language model, which may have been steered by conten
 - **`connect` is restricted** to `SIGLENT_IP`, `SIGLENT_ALLOWED_HOSTS`, or, if neither is set, private-LAN IP addresses, on the instrument port. Loopback, link-local (cloud metadata) and host names are refused. The same check applies to automatic reconnects.
 - **Raw `scpi_command` is off by default.** Set `SIGLENT_ALLOW_RAW_SCPI=true` to enable it; it also requires named hosts (`*` is not accepted).
 - **The Docker image runs unprivileged:** as `node` (UID 1000), with the app files owned by root and no setuid or setgid binaries. The documented `docker run` adds `--read-only --cap-drop=ALL --security-opt=no-new-privileges`. Before publishing, every release checks that the image built from the release commit doesn't run as root, has no setuid or setgid binaries, and starts with those flags. A compromised server process can't modify its own code or use root inside the container as a step towards the host.
+- **Audit log:** every refusal, with the rule that refused it, every connect and disconnect, and every state-changing tool call, as JSON lines on stderr by default; optionally the full trail, including every line written to the scope, and an export to OpenTelemetry. See [Audit log](#audit-log).
 - **Replies stay matched to their queries.** After a timeout, or if a command unexpectedly produces output, the connection is reset so a late reply can't be read as the answer to the next query.
 
 **What it does not protect against:**
@@ -391,6 +394,55 @@ Tool arguments come from a language model, which may have been steered by conten
 >
 > Claude calls `configure_channel` (setting vdiv, coupling) and `configure_acquisition` (setting trigger source, level, slope) in sequence.
 
+## Audit log
+
+The server records what it refused, what it connected to and, optionally, every line it wrote to the scope, as one JSON object per line. Without configuration, the security events go to stderr, which MCP clients usually capture in their own logs.
+
+| `SIGLENT_AUDIT_LOG` | Where | What |
+|---|---|---|
+| not set | stderr | Security events: refusals (`guard.refused`), `instrument.connect`/`disconnect`, state-changing tool calls with their arguments and results, `server.start`/`stop`, and `audit.loss` |
+| `stderr` | stderr | The full trail: also every MCP message, read-only tool calls, and every line written to the instrument with its reply (`scpi.write`, `scpi.result`) |
+| `/absolute/path.jsonl` | that file, appended, created with mode `0600` | The full trail |
+| `off` | nowhere | Nothing |
+
+A refused query looks like this (shortened):
+
+```json
+{"time":"2026-11-16T09:12:03.412Z","event.name":"guard.refused","jsonrpc.request.id":"7","guard":"query","rule":"query.not_a_query","scpi.command":"C1:VDIV 1V","audit.sink":"stderr","audit.seq":12}
+```
+
+- **Every event carries the JSON-RPC request id** of the call that caused it, so a refusal, the tool call and every instrument write it led to can be joined. Events no call caused (auto-connect, an idle close, the scope closing the socket, shutdown) say so in `cause`; a reconnect carries the id of the call that needed it, with `cause: reconnect`.
+- **Refusals have stable rule ids** (`query.not_a_query`, `wire.compound`, `schema.invalid`, `raw.disabled`, `host.not_allowed`, ...), so they can be counted and alerted on without parsing messages.
+- **Losses are visible.** Each sink numbers its records (`audit.seq`) without gaps; a missing number is a lost record, and an `audit.loss` event reports the count once the sink accepts records again. The server never waits for the log: if stderr is a pipe nobody reads, records are dropped and counted, and tool calls carry on. If a write is stuck in the kernel at shutdown (a file on a hung network filesystem), the server ends itself with SIGKILL after about 2 s rather than hanging; that shows as status 137, without a final `server.stop`.
+- **What's logged:** tool arguments and the scope's text replies, each cut at 512 characters. Waveform and screenshot data are logged by size only, and tool results are summarised as types and sizes, not copied. The instrument's `*IDN?` reply includes its serial number. Nothing from the environment is logged beyond the effective configuration.
+- **What it can't do:** a local log records an honest server's activity. A compromised server process could rewrite the file, forge events or send commands without logging them; the file lives on the same machine, under the same user. Exporting to a collector (below) keeps a copy the process can't change afterwards. There's no caller identity in stdio mode: the client's name is recorded as self-reported. The design is in [docs/audit-log-design.md](docs/audit-log-design.md).
+
+### Exporting to OpenTelemetry
+
+The server can also export the full trail as OTLP log records, over HTTP with JSON payloads, to a collector or any backend that accepts OTLP. It's opt-in: set `SIGLENT_AUDIT_OTLP=1` together with the standard endpoint, or use the logs-specific `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, which is the opt-in on its own:
+
+```json
+"env": {
+  "SIGLENT_IP": "192.168.1.126",
+  "SIGLENT_AUDIT_OTLP": "1",
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otlp.example.com:4318",
+  "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer <ingest-only key>"
+}
+```
+
+- **Why the opt-in:** the generic `OTEL_EXPORTER_OTLP_ENDPOINT` is often inherited from an environment set up for another application's telemetry, and the audit trail carries tool arguments and the instrument's serial number. On its own it only gets a startup note. `OTEL_LOGS_EXPORTER=none` or `OTEL_SDK_DISABLED=true` keeps the export off in any case. `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is used as-is; the generic endpoint gets `/v1/logs` appended, and the server logs the URL it posts to.
+- The export is independent of `SIGLENT_AUDIT_LOG`: with `SIGLENT_AUDIT_LOG=off` it's the only copy. `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` work as usual, except that `service.instance.id` stays the server's own, so exported records join the local ones. Other protocols (`grpc`, `http/protobuf`) and other `OTEL_LOGS_EXPORTER` values aren't supported; the server says so at startup.
+- Each record's event name is `siglent.audit.<event>` (for example `siglent.audit.guard.refused`), refusals and failures are `WARN`, and the fields above are attributes. Attribute names follow the OpenTelemetry conventions where one exists (`gen_ai.tool.name`, `mcp.method.name`, `server.address`); the MCP conventions are still at Development status, so a name may change, and the CHANGELOG will say so.
+- **An invalid endpoint stops the server at startup.** An unreachable or failing collector doesn't: tool calls carry on, and the server warns on stderr (once, then at most once a minute). Records a failed export didn't deliver, and records a collector rejects in a "partial success" answer, are counted and reported with `audit.loss` once the export works again. At shutdown, `server.stop` goes to the collector first; the local sinks get theirs after that final export, carrying `otlp.lost` (every record that didn't reach the collector) and `otlp.unexported` (those still waiting), and stderr says how many were lost.
+- **What can be lost:** with a healthy collector, about a second's worth of records not yet exported. While the collector is failing or unreachable, everything still queued, up to 2048 records, plus what a retrying export holds. Losses are counted, not silent, but the records themselves are gone.
+- **What the export protects:** records exported before a compromise can't be changed by the compromised process, provided the backend is append-only and the key can only ingest, not delete or query. Use such a key. After a compromise the process holds that key, so it could stop exporting or send forged records.
+- **The key isn't logged:** it's sent only as the configured header, and the logged endpoint has no userinfo or query string. The exporter's own errors are logged as a message and status code only, never with the collector's response body or a stack trace, and every configured header value (and each part of it, such as the token in `Bearer <token>`) is removed from them.
+- The exporter adds 11 packages, all from the OpenTelemetry project. They're loaded only when an endpoint is set.
+
+In Docker, pass the key by name, so its value comes from the client's environment and isn't written into the MCP config, where `docker inspect` and `ps` would show it: `"-e", "OTEL_EXPORTER_OTLP_HEADERS"` (or use `--env-file`).
+
+**Docker:** stderr works unchanged with `--read-only`. A file needs a mounted directory that UID 1000 can write: add `"-v", "/host/audit:/audit", "-e", "SIGLENT_AUDIT_LOG=/audit/sds.jsonl"` to the `docker run` arguments. On Linux the file then belongs to UID 1000 with mode `0600`, so only that user (or root) can read it on the host; add `"--user", "<your uid>:<your gid>"` to run the server as your own user instead (still not root). Docker Desktop on macOS and Windows maps ownership to your user.
+
 ## Architecture
 
 ```
@@ -399,7 +451,8 @@ Claude Code <-- stdio/JSON-RPC --> siglent-sds-mcp <-- TCP/SCPI --> Oscilloscope
 
 - **Transport:** MCP over stdio (JSON-RPC 2.0)
 - **Protocol:** SCPI commands over raw TCP sockets, newline-terminated
-- **Security checks:** Every command and query passes through the connection layer, which checks it before writing to the socket (see [Security](#security)).
+- **Security checks:** Every command and query passes through the connection layer, which checks it before writing to the socket (see [Security](#security)), and records refusals and writes in the audit log.
+- **Audit log:** `src/audit/` hooks the MCP transport (every message, before the SDK validates it) and the connection, and writes JSON lines through a non-blocking writer; all stderr output goes through that writer, so a stuck stderr can't stall the server. `src/audit/otlp.ts` exports to OpenTelemetry when enabled.
 - **Query Queue:** All SCPI queries are serialized through an internal queue. The oscilloscope processes one command at a time, so even when tools issue parallel requests (via `Promise.all`), the queue ensures they're sent sequentially.
 - **Binary Block Parsing:** Waveform and screenshot data use IEEE 488.2 definite-length block format (`#9XXXXXXXXX` + data bytes + `\n\n`). The connection layer detects and parses these automatically.
 - **Voltage Reconstruction:** Raw ADC codes are converted to voltages: `code * (vdiv / 25) - offset`, with two's complement handling for signed values.
@@ -458,7 +511,14 @@ Then use the local image in your `.mcp.json`:
 ```
 src/
   index.ts              # Entry point, MCP server setup
-  connection.ts         # TCP socket manager with query queue
+  connection.ts         # TCP socket manager with query queue (security choke point)
+  security/             # Guards (rule ids), host policy, parameter formats
+  audit/
+    audit.ts            # Audit events, levels, sinks, loss reporting
+    transport.ts        # Hooks on the MCP transport
+    writer.ts           # Non-blocking writer for stderr and files
+    bounds.ts           # Size limits for logged content
+    otlp.ts             # OpenTelemetry export
   tools/
     connection.ts       # connect, disconnect, identify
     channel.ts          # get_channel, configure_channel

@@ -68,6 +68,17 @@ export class SdsSimulator {
     await new Promise((r) => this.server?.close(r));
   }
 
+  /** Queries (upper case) the simulator never answers, to exercise timeouts. */
+  readonly silent = new Set<string>();
+
+  /** Lines (upper case) on which the simulator resets the connection. */
+  readonly resetOn = new Set<string>();
+
+  /** Reset every client connection (TCP RST), as a crashed instrument would. */
+  resetConnections(): void {
+    for (const sock of this.sockets) sock.resetAndDestroy();
+  }
+
   /** Every line received since the last clear(), in order. */
   commands(): string[] {
     return [...this.lines];
@@ -115,6 +126,19 @@ export class SdsSimulator {
   private handle(sock: net.Socket, line: string): void {
     this.lines.push(line);
     const upper = line.toUpperCase();
+    if (this.silent.has(upper)) return; // never answered: exercises timeouts
+    if (upper === "SCDP") {
+      // A raw BMP: "BM", its size (LE), then the rest, and a trailing newline.
+      const bmp = Buffer.alloc(64);
+      bmp.write("BM", 0, "ascii");
+      bmp.writeUInt32LE(bmp.length, 2);
+      if (!sock.destroyed) sock.write(Buffer.concat([bmp, Buffer.from("\n")]));
+      return;
+    }
+    if (this.resetOn.has(upper)) {
+      sock.resetAndDestroy(); // as if the scope crashed on this line
+      return;
+    }
     if (upper === "*IDN?") return this.reply(sock, SIM_IDN);
     if (upper === "*OPC?") return this.reply(sock, "1", this.opcDelayMs);
     // Test-only: a command without '?' that still produces output, like an
