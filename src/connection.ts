@@ -169,7 +169,10 @@ export class SiglentConnection {
       },
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        const outcome = generation !== this.connectGeneration ? "superseded" : "failed";
+        // "superseded" only when a newer connect cut this one short; a
+        // connection that was refused or timed out on its own is "failed",
+        // even if a newer attempt had started meanwhile.
+        const outcome = (err as { superseded?: boolean }).superseded ? "superseded" : "failed";
         audit.instrumentConnect({ host, port, outcome, message }, ctx);
         throw err;
       }
@@ -212,7 +215,7 @@ export class SiglentConnection {
         if (superseded()) {
           // The scope serves one client at a time: don't hold it open.
           socket.destroy();
-          reject(new Error("Connection attempt superseded by a newer connect."));
+          reject(Object.assign(new Error("Connection attempt superseded by a newer connect."), { superseded: true }));
           return;
         }
         // Remove the connect-phase error handler before installing runtime handlers
@@ -243,16 +246,22 @@ export class SiglentConnection {
         } catch (err) {
           // Only the current attempt may tear down the shared connection;
           // a superseded one would otherwise kill the newer socket.
-          if (!superseded()) this.close("Connection closed", "init_failed", ctx);
+          // A newer connect during the handshake cuts this one short: it
+          // closes this socket, or this attempt stops at a superseded() check.
+          const cutShort = superseded();
+          if (!cutShort) this.close("Connection closed", "init_failed", ctx);
           const msg = err instanceof Error ? err.message : String(err);
           reject(
-            new Error(
-              /timeout/i.test(msg)
-                ? `${host}:${port} accepted the connection but did not respond. ` +
-                  `The scope serves one client at a time, so it is probably in ` +
-                  `use by another program (another MCP server, EasyScopeX, ...). ` +
-                  `Close that connection and try again.`
-                : `Connected but failed to initialize: ${msg}`
+            Object.assign(
+              new Error(
+                /timeout/i.test(msg)
+                  ? `${host}:${port} accepted the connection but did not respond. ` +
+                    `The scope serves one client at a time, so it is probably in ` +
+                    `use by another program (another MCP server, EasyScopeX, ...). ` +
+                    `Close that connection and try again.`
+                  : `Connected but failed to initialize: ${msg}`
+              ),
+              { superseded: cutShort }
             )
           );
         }

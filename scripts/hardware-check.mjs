@@ -159,6 +159,19 @@ async function snapshot(call) {
 
 const q = async (call, command) => (await call("scpi_query", { command })).text;
 
+/** Remove the audit directory, on every exit path. */
+function cleanupAudit() {
+  try {
+    if (dockerImage) {
+      // The container's files belong to UID 1000; remove them through the image.
+      execFileSync("docker", ["run", "--rm", "--user", "0", "-v", `${auditDir}:/audit`, "--entrypoint", "sh", dockerImage, "-c", "rm -rf /audit/*"], { stdio: "ignore" });
+    }
+    rmSync(auditDir, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}
+
 /** The probe payload ("TDIV 2MS" or "TDIV 5MS"), set once the baseline is read. */
 let payload;
 
@@ -179,10 +192,20 @@ function auditText() {
 
 /** The audit records, once every session has written its server.stop. */
 async function readAudit() {
-  for (let t = 0; t < 100; t++) {
-    const records = auditText().split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+  // Each --docker read starts a container, so it polls less often; about 10 s either way.
+  const [tries, interval] = dockerImage ? [10, 1000] : [100, 100];
+  for (let t = 0; t < tries; t++) {
+    const records = [];
+    for (const line of auditText().split("\n")) {
+      if (!line.startsWith("{")) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // a line still being written: read again
+      }
+    }
     if (records.filter((r) => r["event.name"] === "server.stop").length >= started) return records;
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, interval));
   }
   throw new Error(`fewer than ${started} server.stop records in the audit log`);
 }
@@ -207,7 +230,9 @@ async function auditChecks() {
     unrecorded.length ? `missing: ${unrecorded.join("; ")}` : `${expected.length} probes`
   );
   // A leak: a refused query written as a query, a refused command written as
-  // a command, or the timebase payload in any write. (The F5 probes send
+  // a command, or the timebase payload anywhere in a write (the F2 probes
+  // would smuggle it inside a longer line: "C1:VDIV 500mV\nTDIV 2MS"). No
+  // legitimate write contains it: restore writes the baseline, the other value. (The F5 probes send
   // "C1:VDIV?" and "*OPC?" through scpi_command; the server writes those
   // strings as queries all the time, so the kind matters.)
   const refusedAs = (tool) => new Set(expected.filter(([, t]) => t === tool).map(([, , args]) => args.command));
@@ -222,7 +247,7 @@ async function auditChecks() {
       return (
         (refusedQueries.has(w) && kind !== "command") ||
         (refusedCommands.has(w) && kind === "command") ||
-        (payload !== undefined && w === payload)
+        (payload !== undefined && w.includes(payload))
       );
     })
     .map((r) => `${r["scpi.kind"]} ${r["scpi.command"]}`);
@@ -237,6 +262,7 @@ async function main() {
   check("connect + identify", s.conn.ok && /SDS/.test(s.conn.text), s.conn.text.replace(/\n/g, " "));
   if (!s.conn.ok) {
     await s.close();
+    cleanupAudit();
     process.exit(1);
   }
   let original;
@@ -247,6 +273,7 @@ async function main() {
     check("read original settings", false, err.message);
     await s.close();
     console.log("\nAborted before changing any settings.");
+    cleanupAudit();
     process.exit(1);
   }
   console.log(`  info  original: ${JSON.stringify(original)}`);
@@ -263,11 +290,7 @@ async function main() {
   } catch (err) {
     check("audit log read", false, err instanceof Error ? err.message : String(err));
   }
-  if (dockerImage) {
-    // The container's files belong to UID 1000; remove them through the image.
-    execFileSync("docker", ["run", "--rm", "--user", "0", "-v", `${auditDir}:/audit`, "--entrypoint", "sh", dockerImage, "-c", "rm -rf /audit/*"], { stdio: "ignore" });
-  }
-  rmSync(auditDir, { recursive: true, force: true });
+  cleanupAudit();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
@@ -411,5 +434,6 @@ async function restore(original) {
 
 main().catch((err) => {
   console.error(err);
+  cleanupAudit();
   process.exit(1);
 });

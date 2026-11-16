@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { SdsSimulator, SIM_IDN } from "../simulator/sds-simulator.js";
 import { callTool, captureAudit, createTestServer, getText, MemorySink } from "../helpers.js";
 import { audit, withAuditContext, type AuditRecord, type AuditSink } from "../../src/audit/audit.js";
-import { connection } from "../../src/connection.js";
+import { connection, SiglentConnection } from "../../src/connection.js";
 import { POLICY_RULES } from "../../src/security/scpi-guard.js";
 
 let sim: SdsSimulator;
@@ -236,6 +236,90 @@ describe("audit log", () => {
     const [result] = resultOf(full, binary["scpi.write_id"]);
     expect(Number(result["reply.bytes"])).toBeGreaterThan(0);
     expect(result["reply.text"]).toBeUndefined();
+  });
+});
+
+describe("audit log: connection edge cases", () => {
+  it("records both writes of a queued setter as not written when the scope resets the connection", async () => {
+    const ctx = await connectedServer();
+    try {
+      sim.silent.add("C1:SILENT?");
+      const pending = [
+        callTool(ctx.client, "scpi_query", { command: "C1:SILENT?", timeout_ms: 5000 }),
+        callTool(ctx.client, "configure_channel", { channel: "C1", vdiv: "500mV" }),
+      ];
+      await new Promise((r) => setTimeout(r, 100)); // the query on the wire, the setter queued
+      sim.resetConnections();
+      await Promise.all(pending);
+      const setterId = requestIdFor(full, "500mV");
+      // Neither the setter nor its *OPC? was written: two results, no writes.
+      expect(full.events("scpi.write").filter((r) => r["jsonrpc.request.id"] === setterId)).toEqual([]);
+      expect(full.events("scpi.result").filter((r) => r["jsonrpc.request.id"] === setterId).map((r) => r["outcome"])).toEqual([
+        "not_written",
+        "not_written",
+      ]);
+      expectOneResultPerWrite(full);
+    } finally {
+      connection.disconnect();
+      await ctx.cleanup();
+    }
+  });
+
+  it("records a timeout inside the setter's *OPC? gap as not written", async () => {
+    const sink = new MemorySink();
+    captureAudit(sink);
+    // A command timeout shorter than the 20 ms gap: it fires before the *OPC? is written.
+    const conn = new SiglentConnection({
+      hostPolicy: { allowedHosts: ["127.0.0.1"], allowedPorts: [simPort] },
+      defaultPort: simPort,
+      commandTimeoutMs: 5,
+    });
+    try {
+      await conn.connect("127.0.0.1", simPort);
+      sink.clear();
+      await withAuditContext({ requestId: "gap", cause: "tool-call" }, () => conn.sendCommand("C1:VDIV 1V")).catch(() => {});
+      const [setter] = sink.events("scpi.write");
+      expect(setter).toMatchObject({ "scpi.command": "C1:VDIV 1V", "scpi.kind": "command" });
+      expect(sink.events("scpi.write").filter((r) => r["scpi.kind"] === "opc")).toEqual([]);
+      expect(sink.events("scpi.result").map((r) => r["outcome"]).sort()).toEqual(["not_written", "written"]);
+      expect(sink.events("instrument.disconnect")).toEqual([
+        expect.objectContaining({ reason: "reset_after_timeout", cause: "reset", "jsonrpc.request.id": "gap" }),
+      ]);
+    } finally {
+      conn.disconnect();
+      audit.reset();
+    }
+  });
+
+  it("calls an attempt superseded only when a newer connect cut it short", async () => {
+    const sink = new MemorySink();
+    captureAudit(sink);
+    const closedPort = simPort + 1000; // nothing listens there
+    const conn = new SiglentConnection({
+      hostPolicy: { allowedHosts: ["127.0.0.1"], allowedPorts: [simPort, closedPort] },
+      defaultPort: simPort,
+    });
+    try {
+      // A is refused on its own, while B has started: A "failed".
+      const a = withAuditContext({ requestId: "A", cause: "tool-call" }, () => conn.connect("127.0.0.1", closedPort));
+      const b = withAuditContext({ requestId: "B", cause: "tool-call" }, () => conn.connect("127.0.0.1", simPort));
+      await Promise.allSettled([a, b]);
+      const outcome = (id: string) => sink.events("instrument.connect").find((r) => r["jsonrpc.request.id"] === id)?.["outcome"];
+      expect(outcome("A")).toBe("failed");
+      expect(outcome("B")).toBe("connected");
+
+      // C is in its handshake when D starts: C "superseded".
+      sink.clear();
+      const c = withAuditContext({ requestId: "C", cause: "tool-call" }, () => conn.connect("127.0.0.1", simPort));
+      await new Promise((r) => setTimeout(r, 50));
+      const d = withAuditContext({ requestId: "D", cause: "tool-call" }, () => conn.connect("127.0.0.1", simPort));
+      await Promise.allSettled([c, d]);
+      expect(outcome("C")).toBe("superseded");
+      expect(outcome("D")).toBe("connected");
+    } finally {
+      conn.disconnect();
+      audit.reset();
+    }
   });
 });
 
