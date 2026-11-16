@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.1.0
+
+### Added
+
+- **Audit log.** The server records what it refused, what it connected to and, optionally, every line it wrote to the scope, as JSON lines. Configured with `SIGLENT_AUDIT_LOG`; see the README's "Audit log" section and `docs/audit-log-design.md`.
+  - By default, security events go to stderr: every refusal (`guard.refused`) with a stable rule id, `instrument.connect` and `instrument.disconnect`, every state-changing tool call (`readOnlyHint: false`) with its arguments and result, `server.start`/`server.stop` and `audit.loss`.
+  - `SIGLENT_AUDIT_LOG=stderr` gives the full trail on stderr: also every MCP message, read-only calls and every instrument write with its reply. An absolute path gives the full trail in that file (mode `0600`); `off` disables it. A relative path, or a file that can't be opened, stops the server at startup.
+  - Refusals the SDK makes before a tool runs are recorded too: arguments that fail the tool's schema (`schema.invalid`, e.g. a newline in `vdiv`) and calls to `scpi_command` while it's disabled (`raw.disabled`). Lines that aren't valid JSON-RPC are recorded as `mcp.malformed`.
+  - Every event carries the JSON-RPC request id of the call that caused it, including instrument writes made later from the query queue. Connection events say what caused them: an idle close (`cause: idle-close`), the resets after a timeout or an out-of-step reply (`cause: reset`, with the id of the call whose query caused it), and a reconnect, which carries the id of the call that needed it (`cause: reconnect`). A setter paced by `*OPC?` is two writes, the setter (`scpi.kind: command`) and its `*OPC?` (`opc`); if the connection resets in the gap between them (a socket error or a timeout), the `*OPC?` is recorded as `not_written`; if the setter itself produces a reply in that gap, the `*OPC?` gets `out_of_step`. Waveform and screenshot data are logged by size only. A cancelled call is closed with `outcome: cancelled`.
+  - Each sink numbers its records without gaps; lost records are counted and reported with `audit.loss` (and a warning on stderr) once the sink accepts records again.
+- **OpenTelemetry export.** With `SIGLENT_AUDIT_OTLP=1` and the standard `OTEL_EXPORTER_OTLP_ENDPOINT`, or with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` alone, the full audit trail is also exported as OTLP log records over HTTP with JSON payloads, independent of `SIGLENT_AUDIT_LOG`. Event names are `siglent.audit.<event>`; refusals and failures are `WARN`. It's opt-in because the generic endpoint is often inherited from another application's environment: that endpoint alone gets a startup note, not an export. `OTEL_LOGS_EXPORTER=none` keeps it off in any case. An invalid endpoint stops the server at startup; a failing collector doesn't, but the server warns on stderr (rate-limited) and counts the records that didn't arrive, including those a collector rejects in a partial-success answer, reporting them with `audit.loss` once the export works. At shutdown the local sinks' `server.stop` carries the OTLP totals after the final export (`otlp.lost`, `otlp.unexported`), and stderr says how many records were lost. The key in `OTEL_EXPORTER_OTLP_HEADERS` isn't logged: the logged endpoint has no userinfo or query string, the exporter's errors are logged as message and status only (no response body, no stack), and configured header values, and their parts, are redacted. Adds 11 dependencies, all from the OpenTelemetry project (`@opentelemetry/api`, `api-logs`, `core`, `sdk-logs`, `exporter-logs-otlp-http`, `resources` and what they pull in), loaded only when an endpoint is set.
+- `ScpiPolicyError` carries a stable `rule` id (`query.not_a_query`, `wire.compound`, `host.not_allowed`, ...).
+
+### Changed
+
+- **Requires Node.js 22.15 or later** (was 20.9). The OpenTelemetry 3.x packages require it, and Node 20 reached end of life in April 2026. The Docker image (Node 26) is unaffected; with `npx`, upgrade Node first.
+- **All stderr output goes through one non-blocking writer**, the human-readable lines and Node's process warnings included. A client that pipes the server's stderr and never reads it can no longer stall tool calls once the pipe is full; lines are dropped and counted instead.
+- **The server exits when stdin closes.** Until now an open instrument connection kept the process alive after the client had gone. On stdin end, SIGTERM or SIGINT, the server closes the instrument connection, flushes the audit log (up to 1 s), writes `server.stop`, flushes again (up to 1 s) and exits. If a write is still stuck in the kernel then (a file on a hung network filesystem, say), the server kills itself with SIGKILL instead of waiting for it, since an ordinary exit would wait without a time limit; it then ends with status 137 (killed by SIGKILL) and no `server.stop`, which is expected, not a crash. A second signal during shutdown does the same.
+- **Docker:** the server still writes no files by default, so `--read-only` works unchanged. A file audit log needs a mounted directory writable by UID 1000; `scripts/check-image.sh` checks that.
+
+### Tests
+
+- OTLP tests run the server process against a local HTTP server standing in for a collector: the exported records, their names, severities, attributes and resource, the flush on shutdown, the export-only mode, losses while the collector rejects exports and their report once it accepts them, an invalid endpoint, and that the key appears in no record and no stderr line.
+- Audit tests run the MCP server against the simulator and check attribution with parallel calls, after a timeout and when a disconnect cuts queued queries off, the per-sink numbering, bounded strings, and that every rule id is produced. A contract test pins the SDK behaviours the transport hooks rely on. Process tests check that stdout stays JSON-RPC, shutdown on stdin end and SIGTERM, the file mode, fail-closed startup, and that 2,000 tool calls complete with stderr unread.
+- The hardware check drains the server's stderr and uses the audit log as a second oracle across its three server sessions: every security probe must be recorded as `guard.refused` with its expected rule, no refused query or command may be written as such, and the timebase payload may appear in no instrument write, not even inside a longer line.
+
 ## 2.0.3
 
 ### Security

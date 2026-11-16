@@ -23,10 +23,16 @@
  *   measurement path is checked with a read-only PAVA? query instead.
  * - The scope serves one TCP client at a time: close other programs using it
  *   (EasyScopeX, another MCP server) first.
+ * - The audit log is a second, independent oracle: every security probe must
+ *   be recorded as guard.refused with the expected rule, and no probe's
+ *   payload may appear in any scpi.write.
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 const ip = process.argv[2];
@@ -47,6 +53,17 @@ function check(label, ok, detail = "") {
 }
 
 const sessions = new Set();
+let started = 0;
+
+// Every server session writes its full audit trail here. With --docker the
+// directory is mounted at /audit and must be writable by the container's UID 1000.
+const auditDir = mkdtempSync(path.join(tmpdir(), "sds-hardware-check-"));
+chmodSync(auditDir, 0o777);
+const auditFile = path.join(auditDir, "audit.jsonl");
+const auditEnv = { SIGLENT_AUDIT_LOG: dockerImage ? "/audit/audit.jsonl" : auditFile };
+
+/** [label, tool, arguments, the rule the audit log must record] for every probe. */
+const expected = [];
 
 // The server's own environment. With --docker it goes into the container as
 // -e flags; the docker CLI itself only gets PATH, HOME and the variables
@@ -60,6 +77,7 @@ function serverCommand(serverEnv) {
     args: [
       "run", "--rm", "-i",
       "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+      "-v", `${auditDir}:/audit`,
       ...Object.entries(serverEnv).flatMap(([k, val]) => ["-e", `${k}=${val}`]),
       dockerImage,
     ],
@@ -75,11 +93,15 @@ function serverCommand(serverEnv) {
 
 async function startServer(extraEnv = {}) {
   const transport = new StdioClientTransport({
-    ...serverCommand({ SIGLENT_IP: ip, ...extraEnv }),
+    ...serverCommand({ SIGLENT_IP: ip, ...auditEnv, ...extraEnv }),
     stderr: "pipe",
   });
   const client = new Client({ name: "hardware-check", version: "1.0.0" });
   await client.connect(transport);
+  started++;
+  // Drain stderr: a pipe nobody reads fills up. The server doesn't stall on it
+  // (its writer is non-blocking), but it would drop audit events.
+  transport.stderr?.on("data", () => {});
   sessions.add(client);
   const call = async (name, args = {}) => {
     try {
@@ -137,6 +159,102 @@ async function snapshot(call) {
 
 const q = async (call, command) => (await call("scpi_query", { command })).text;
 
+/** Remove the audit directory, on every exit path. */
+function cleanupAudit() {
+  try {
+    if (dockerImage) {
+      // The container's files belong to UID 1000; remove them through the image.
+      execFileSync("docker", ["run", "--rm", "--user", "0", "-v", `${auditDir}:/audit`, "--entrypoint", "sh", dockerImage, "-c", "rm -rf /audit/*"], { stdio: "ignore" });
+    }
+    rmSync(auditDir, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}
+
+/** The probe payload ("TDIV 2MS" or "TDIV 5MS"), set once the baseline is read. */
+let payload;
+
+/**
+ * The audit file's text. With --docker it belongs to the container's UID 1000
+ * with mode 0600, which a different host user can't read on Linux, so it's
+ * read through the image as that user.
+ */
+function auditText() {
+  try {
+    return dockerImage
+      ? execFileSync("docker", ["run", "--rm", "-v", `${auditDir}:/audit`, "--entrypoint", "cat", dockerImage, "/audit/audit.jsonl"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+      : readFileSync(auditFile, "utf8");
+  } catch {
+    return ""; // not written yet
+  }
+}
+
+/** The audit records, once every session has written its server.stop. */
+async function readAudit() {
+  // Each --docker read starts a container, so it polls less often; about 10 s either way.
+  const [tries, interval] = dockerImage ? [10, 1000] : [100, 100];
+  for (let t = 0; t < tries; t++) {
+    const records = [];
+    for (const line of auditText().split("\n")) {
+      if (!line.startsWith("{")) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // a line still being written: read again
+      }
+    }
+    if (records.filter((r) => r["event.name"] === "server.stop").length >= started) return records;
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  throw new Error(`fewer than ${started} server.stop records in the audit log`);
+}
+
+async function auditChecks() {
+  console.log("\n4. Audit log (an independent record of what the servers refused and wrote)");
+  const records = await readAudit();
+  const refusals = records.filter((r) => r["event.name"] === "guard.refused");
+  const unrecorded = expected
+    .filter(([, tool, args, rule]) => {
+      if (tool === "connect") return !refusals.some((r) => r.rule === rule && r["server.address"] === args.host);
+      const ids = records
+        .filter((r) => r["event.name"] === "mcp.request" && r["gen_ai.tool.name"] === tool &&
+          r["gen_ai.tool.call.arguments"] === JSON.stringify(args))
+        .map((r) => `${r["service.instance.id"]}/${r["jsonrpc.request.id"]}`);
+      return !refusals.some((r) => r.rule === rule && ids.includes(`${r["service.instance.id"]}/${r["jsonrpc.request.id"]}`));
+    })
+    .map(([label]) => label);
+  check(
+    "every probe recorded as guard.refused with its rule",
+    expected.length > 0 && unrecorded.length === 0,
+    unrecorded.length ? `missing: ${unrecorded.join("; ")}` : `${expected.length} probes`
+  );
+  // A leak: a refused query written as a query, a refused command written as
+  // a command, or the timebase payload anywhere in a write. The F2 probes
+  // would smuggle it inside a longer line ("C1:VDIV 500mV\nTDIV 2MS"); no
+  // legitimate write contains it, because restore writes the baseline, the
+  // other value. The F5 probes send "C1:VDIV?" and "*OPC?" through
+  // scpi_command, and the server writes those strings as queries all the
+  // time, so the kind matters.
+  const refusedAs = (tool) => new Set(expected.filter(([, t]) => t === tool).map(([, , args]) => args.command));
+  const refusedQueries = refusedAs("scpi_query");
+  const refusedCommands = refusedAs("scpi_command");
+  const writeRecords = records.filter((r) => r["event.name"] === "scpi.write");
+  const writes = writeRecords.map((r) => String(r["scpi.command"]));
+  const leaked = writeRecords
+    .filter((r) => {
+      const w = String(r["scpi.command"]);
+      const kind = r["scpi.kind"];
+      return (
+        (refusedQueries.has(w) && kind !== "command") ||
+        (refusedCommands.has(w) && kind === "command") ||
+        (payload !== undefined && w.includes(payload))
+      );
+    })
+    .map((r) => `${r["scpi.kind"]} ${r["scpi.command"]}`);
+  check("no probe's payload reached the wire", writes.length > 0 && leaked.length === 0, `${writes.length} writes${leaked.length ? `, leaked: ${leaked.join(", ")}` : ""}`);
+}
+
 async function main() {
   console.log(`Hardware check: ${ip}\n`);
 
@@ -145,6 +263,7 @@ async function main() {
   check("connect + identify", s.conn.ok && /SDS/.test(s.conn.text), s.conn.text.replace(/\n/g, " "));
   if (!s.conn.ok) {
     await s.close();
+    cleanupAudit();
     process.exit(1);
   }
   let original;
@@ -155,6 +274,7 @@ async function main() {
     check("read original settings", false, err.message);
     await s.close();
     console.log("\nAborted before changing any settings.");
+    cleanupAudit();
     process.exit(1);
   }
   console.log(`  info  original: ${JSON.stringify(original)}`);
@@ -166,6 +286,12 @@ async function main() {
   } finally {
     await restore(original);
   }
+  try {
+    await auditChecks();
+  } catch (err) {
+    check("audit log read", false, err instanceof Error ? err.message : String(err));
+  }
+  cleanupAudit();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
@@ -204,16 +330,18 @@ async function runChecks(s) {
     return { same: now === baseline, now };
   };
   console.log(`\n  Security (payload: TDIV ${payloadTdiv}; TDIV must stay ${baseline})`);
+  payload = `TDIV ${payloadTdiv}`;
   const probes = [
-    ["F1 setter via scpi_query", "scpi_query", { command: `TDIV ${payloadTdiv}` }],
-    ["F1 compound query hides setter", "scpi_query", { command: `TDIV?;TDIV ${payloadTdiv}` }],
-    ["F1 parameters after query header", "scpi_query", { command: `TDIV? ${payloadTdiv}` }],
-    ["F1 reset in query form", "scpi_query", { command: "*RST?" }],
-    ["F1 auto setup in query form", "scpi_query", { command: "ASET?" }],
-    ["F2 newline injection in vdiv", "configure_channel", { channel: "C1", vdiv: `500mV\nTDIV ${payloadTdiv}` }],
-    ["F2 compound injection in trigger_level", "configure_acquisition", { trigger_level: `0V;TDIV ${payloadTdiv}` }],
-    ["F2 newline injection in timebase", "configure_acquisition", { timebase: `1MS\nTDIV ${payloadTdiv}` }],
+    ["F1 setter via scpi_query", "scpi_query", { command: `TDIV ${payloadTdiv}` }, "query.not_a_query"],
+    ["F1 compound query hides setter", "scpi_query", { command: `TDIV?;TDIV ${payloadTdiv}` }, "wire.compound"],
+    ["F1 parameters after query header", "scpi_query", { command: `TDIV? ${payloadTdiv}` }, "query.parameters_not_allowed"],
+    ["F1 reset in query form", "scpi_query", { command: "*RST?" }, "query.common_not_allowed"],
+    ["F1 auto setup in query form", "scpi_query", { command: "ASET?" }, "query.action_command"],
+    ["F2 newline injection in vdiv", "configure_channel", { channel: "C1", vdiv: `500mV\nTDIV ${payloadTdiv}` }, "schema.invalid"],
+    ["F2 compound injection in trigger_level", "configure_acquisition", { trigger_level: `0V;TDIV ${payloadTdiv}` }, "schema.invalid"],
+    ["F2 newline injection in timebase", "configure_acquisition", { timebase: `1MS\nTDIV ${payloadTdiv}` }, "schema.invalid"],
   ];
+  expected.push(...probes);
   for (const [label, tool, args] of probes) {
     const res = await s.call(tool, args);
     const st = await unchanged(s.call);
@@ -233,6 +361,7 @@ async function runChecks(s) {
     if (!r.ok || Math.abs(parseFloat(levelBefore) - 0.3) > 0.05) {
       check(set50Label, false, `could not set the trigger level to 300 mV first: ${r.ok ? levelBefore : r.text}`);
     } else {
+      expected.push([set50Label, "scpi_query", { command: "SET50?" }, "query.action_command"]);
       const res = await s.call("scpi_query", { command: "SET50?" });
       const levelAfter = await q(s.call, `${trigCh}:TRLV?`);
       const st = await unchanged(s.call);
@@ -249,6 +378,7 @@ async function runChecks(s) {
 
   // Any private-LAN address other than the scope's, which is allowed.
   const probeHost = ip === "192.168.1.1" ? "192.168.1.2" : "192.168.1.1";
+  expected.push([`F3 connect to ${probeHost}`, "connect", { host: probeHost }, "host.not_allowed"]);
   r = await s.call("connect", { host: probeHost });
   const idn = await q(s.call, "*IDN?");
   check(`F3 connect to another LAN host (${probeHost}) rejected, session intact`, !r.ok && /SDS/.test(idn), r.text);
@@ -261,6 +391,7 @@ async function runChecks(s) {
   check("connect", raw.conn.ok, raw.conn.text.replace(/\n/g, " "));
 
   for (const command of ["C1:VDIV?", "*OPC?"]) {
+    expected.push([`F5 query "${command}" as a command`, "scpi_command", { command }, "command.is_query"]);
     r = await raw.call("scpi_command", { command });
     const after = await q(raw.call, "TDIV?");
     check(
@@ -270,6 +401,7 @@ async function runChecks(s) {
     );
   }
 
+  expected.push(["F2 newline injection in scpi_command", "scpi_command", { command: `TDIV ${payloadTdiv}\nTDIV 5MS` }, "wire.control_char"]);
   r = await raw.call("scpi_command", { command: `TDIV ${payloadTdiv}\nTDIV 5MS` });
   const st = await unchanged(raw.call);
   check("F2 newline injection in scpi_command", !r.ok && st.same, `TDIV=${st.now}`);
@@ -303,5 +435,6 @@ async function restore(original) {
 
 main().catch((err) => {
   console.error(err);
+  cleanupAudit();
   process.exit(1);
 });

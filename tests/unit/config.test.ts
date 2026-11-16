@@ -51,3 +51,77 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ [name]: value })).toThrow();
   });
 });
+
+describe("SIGLENT_AUDIT_LOG", () => {
+  it.each([
+    [undefined, { sink: "stderr", level: "security" }],
+    ["", { sink: "stderr", level: "security" }],
+    ["stderr", { sink: "stderr", level: "full" }],
+    ["STDERR", { sink: "stderr", level: "full" }],
+    ["off", { sink: "off" }],
+    ["/var/log/sdg.jsonl", { sink: "file", level: "full", path: "/var/log/sdg.jsonl" }],
+  ])("%s -> %o", (value, expected) => {
+    expect(loadConfig(value === undefined ? {} : { SIGLENT_AUDIT_LOG: value }).audit).toEqual(expected);
+  });
+
+  it.each(["audit.jsonl", "./logs/a.jsonl", "on"])("fails closed on %s (not an absolute path)", (value) => {
+    expect(() => loadConfig({ SIGLENT_AUDIT_LOG: value })).toThrow(/SIGLENT_AUDIT_LOG/);
+  });
+});
+
+describe("OTLP export configuration", () => {
+  it("is off without an endpoint", () => {
+    expect(loadConfig({}).otlp).toBeUndefined();
+  });
+
+  it("uses OTEL_EXPORTER_OTLP_ENDPOINT, logged without userinfo, query or fragment", () => {
+    const c = loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://user:pw@collector.example:4318/base?api_key=x#f", SIGLENT_AUDIT_OTLP: "1" });
+    // The exporter appends /v1/logs to the generic endpoint; the logged URL is the one it posts to.
+    expect(c.otlp).toEqual({ endpoint: "https://collector.example:4318/base/v1/logs" });
+  });
+
+  it("needs an opt-in for the generic endpoint, which is often inherited", () => {
+    const generic = loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318" });
+    expect(generic.otlp).toBeUndefined();
+    expect(generic.notes.join("\n")).toMatch(/isn't exported: set SIGLENT_AUDIT_OTLP=1/);
+    expect(loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318", SIGLENT_AUDIT_OTLP: "true" }).otlp).toBeDefined();
+    // The logs-specific endpoint is the opt-in itself.
+    expect(loadConfig({ OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://a.example:4318/v1/logs" }).otlp).toBeDefined();
+  });
+
+  it("fails closed on the opt-in without an endpoint, unless the export is switched off", () => {
+    expect(() => loadConfig({ SIGLENT_AUDIT_OTLP: "1" })).toThrow(/SIGLENT_AUDIT_OTLP=1 needs OTEL_EXPORTER_OTLP_ENDPOINT/);
+    expect(loadConfig({ SIGLENT_AUDIT_OTLP: "1", OTEL_LOGS_EXPORTER: "none" }).otlp).toBeUndefined();
+    expect(loadConfig({ SIGLENT_AUDIT_OTLP: "1", OTEL_SDK_DISABLED: "true" }).otlp).toBeUndefined();
+  });
+
+  it("prefers OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", () => {
+    const c = loadConfig({
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318",
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://b.example:4318/v1/logs",
+    });
+    expect(c.otlp?.endpoint).toBe("http://b.example:4318/v1/logs");
+  });
+
+  it("honours OTEL_LOGS_EXPORTER", () => {
+    const base = { OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318", SIGLENT_AUDIT_OTLP: "1" };
+    expect(loadConfig({ ...base, OTEL_LOGS_EXPORTER: "none" }).otlp).toBeUndefined();
+    expect(loadConfig({ ...base, OTEL_LOGS_EXPORTER: "otlp" }).otlp).toBeDefined();
+    const console = loadConfig({ ...base, OTEL_LOGS_EXPORTER: "console" });
+    expect(console.otlp).toBeUndefined();
+    expect(console.notes.join("\n")).toMatch(/OTEL_LOGS_EXPORTER=console is not supported/);
+  });
+
+  it("respects OTEL_SDK_DISABLED", () => {
+    expect(loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318", SIGLENT_AUDIT_OTLP: "1", OTEL_SDK_DISABLED: "true" }).otlp).toBeUndefined();
+  });
+
+  it.each(["not a url", "ftp://a.example/", "localhost:4318"])("fails closed on the endpoint %s", (value) => {
+    expect(() => loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: value, SIGLENT_AUDIT_OTLP: "1" })).toThrow(/OTEL_EXPORTER_OTLP_ENDPOINT/);
+  });
+
+  it("notes an unsupported protocol instead of ignoring it silently", () => {
+    const c = loadConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://a.example:4318", SIGLENT_AUDIT_OTLP: "1", OTEL_EXPORTER_OTLP_PROTOCOL: "grpc" });
+    expect(c.notes.join("\n")).toMatch(/grpc is not supported/);
+  });
+});

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Smoke-test a built Docker image: it must not run as root, must contain no
 # setuid or setgid files, and the server must start and answer an MCP
-# initialize request with the hardening flags the README recommends. No
+# initialize request with the hardening flags the README recommends, and
+# write a file audit log to a mounted directory under those flags. No
 # instrument is needed; nothing connects to it.
 #
 # Usage: scripts/check-image.sh IMAGE
@@ -48,4 +49,27 @@ case "$reply" in
   *) fail "$image didn't answer initialize under $hardening. Output: $reply" ;;
 esac
 
-echo "$image: runs as UID $uid ('$user'), no setuid/setgid files, answers initialize under $hardening."
+# A file audit log on a mounted directory, as the README documents for
+# --read-only. The container's UID 1000 must be able to create the file.
+audit_dir="$(mktemp -d)"
+# The container's files in it belong to UID 1000; remove them through the image.
+trap 'docker run --rm --user 0 -v "$audit_dir:/audit" --entrypoint sh "$image" -c "rm -rf /audit/*" >/dev/null 2>&1; rm -rf "$audit_dir"' EXIT
+chmod 777 "$audit_dir"
+status=0
+# shellcheck disable=SC2086 # $hardening is a list of flags
+printf '%s\n' "$request" | timeout 30 docker run --rm -i $hardening \
+  -v "$audit_dir:/audit" -e SIGLENT_AUDIT_LOG=/audit/audit.jsonl "$image" >/dev/null 2>&1 || status=$?
+[ "$status" -eq 0 ] || fail "$image exited with status $status with a file audit log on a mounted directory."
+[ -f "$audit_dir/audit.jsonl" ] || fail "$image didn't create the audit log on the mounted directory."
+# The file belongs to the container's UID 1000 with mode 0600, so on Linux
+# the host user can't read it: read it through the image, as that user.
+log="$(docker run --rm -v "$audit_dir:/audit" --entrypoint cat "$image" /audit/audit.jsonl)" ||
+  fail "Can't read the audit log as the container's user."
+for event in server.start mcp.request server.stop; do
+  case "$log" in
+    *"\"event.name\":\"$event\""*) ;;
+    *) fail "$image's audit log has no $event event." ;;
+  esac
+done
+
+echo "$image: runs as UID $uid ('$user'), no setuid/setgid files, answers initialize under $hardening, writes a file audit log to a mounted directory."

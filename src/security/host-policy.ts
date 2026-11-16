@@ -52,6 +52,7 @@ export function isPrivateLanAddress(host: string): boolean {
 export function assertConnectAllowed(host: string, port: number, policy: HostPolicy): void {
   if (!Number.isInteger(port) || !policy.allowedPorts.includes(port)) {
     throw new ScpiPolicyError(
+      "host.port_not_allowed",
       `Port ${port} is not allowed. Allowed ports: ${policy.allowedPorts.join(", ")}. ` +
         "Configure SIGLENT_PORT to use a different instrument port."
     );
@@ -63,6 +64,7 @@ export function assertConnectAllowed(host: string, port: number, policy: HostPol
     const normalized = host.trim().toLowerCase();
     if (!policy.allowedHosts.some((h) => h.toLowerCase() === normalized)) {
       throw new ScpiPolicyError(
+        "host.not_allowed",
         `Host "${host}" is not in the allowed list. ` +
           "Set SIGLENT_ALLOWED_HOSTS (comma-separated) to allow additional instruments."
       );
@@ -72,6 +74,7 @@ export function assertConnectAllowed(host: string, port: number, policy: HostPol
 
   if (!isPrivateLanAddress(host)) {
     throw new ScpiPolicyError(
+      "host.not_private_lan",
       `Host "${host}" is not allowed. Without SIGLENT_ALLOWED_HOSTS, only private-LAN IP ` +
         "addresses (10/8, 172.16/12, 192.168/16, fc00::/7) are accepted; host names, loopback " +
         "and link-local addresses are rejected."
