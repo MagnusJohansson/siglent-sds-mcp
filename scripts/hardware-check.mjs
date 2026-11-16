@@ -230,11 +230,12 @@ async function auditChecks() {
     unrecorded.length ? `missing: ${unrecorded.join("; ")}` : `${expected.length} probes`
   );
   // A leak: a refused query written as a query, a refused command written as
-  // a command, or the timebase payload anywhere in a write (the F2 probes
-  // would smuggle it inside a longer line: "C1:VDIV 500mV\nTDIV 2MS"). No
-  // legitimate write contains it: restore writes the baseline, the other value. (The F5 probes send
-  // "C1:VDIV?" and "*OPC?" through scpi_command; the server writes those
-  // strings as queries all the time, so the kind matters.)
+  // a command, or the timebase payload anywhere in a write. The F2 probes
+  // would smuggle it inside a longer line ("C1:VDIV 500mV\nTDIV 2MS"); no
+  // legitimate write contains it, because restore writes the baseline, the
+  // other value. The F5 probes send "C1:VDIV?" and "*OPC?" through
+  // scpi_command, and the server writes those strings as queries all the
+  // time, so the kind matters.
   const refusedAs = (tool) => new Set(expected.filter(([, t]) => t === tool).map(([, , args]) => args.command));
   const refusedQueries = refusedAs("scpi_query");
   const refusedCommands = refusedAs("scpi_command");

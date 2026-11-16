@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
+import { createServer as createTcpServer } from "node:net";
 import { join } from "node:path";
 import { SdsSimulator, SIM_IDN } from "../simulator/sds-simulator.js";
 import { callTool, captureAudit, createTestServer, getText, MemorySink } from "../helpers.js";
@@ -294,7 +295,15 @@ describe("audit log: connection edge cases", () => {
   it("calls an attempt superseded only when a newer connect cut it short", async () => {
     const sink = new MemorySink();
     captureAudit(sink);
-    const closedPort = simPort + 1000; // nothing listens there
+    // A port that's in range and known to be closed: listen on port 0, read
+    // the port the OS picked, and close the listener again.
+    const closedPort = await new Promise<number>((resolve) => {
+      const l = createTcpServer();
+      l.listen(0, "127.0.0.1", () => {
+        const port = (l.address() as { port: number }).port;
+        l.close(() => resolve(port));
+      });
+    });
     const conn = new SiglentConnection({
       hostPolicy: { allowedHosts: ["127.0.0.1"], allowedPorts: [simPort, closedPort] },
       defaultPort: simPort,
@@ -316,6 +325,16 @@ describe("audit log: connection edge cases", () => {
       await Promise.allSettled([c, d]);
       expect(outcome("C")).toBe("superseded");
       expect(outcome("D")).toBe("connected");
+
+      // E and F start in the same tick: E's socket connects after F started,
+      // the other path that cuts an attempt short.
+      sink.clear();
+      const e = withAuditContext({ requestId: "E", cause: "tool-call" }, () => conn.connect("127.0.0.1", simPort));
+      const f = withAuditContext({ requestId: "F", cause: "tool-call" }, () => conn.connect("127.0.0.1", simPort));
+      const [er] = await Promise.allSettled([e, f]);
+      expect(er.status === "rejected" && String(er.reason)).toMatch(/superseded by a newer connect/);
+      expect(outcome("E")).toBe("superseded");
+      expect(outcome("F")).toBe("connected");
     } finally {
       conn.disconnect();
       audit.reset();
